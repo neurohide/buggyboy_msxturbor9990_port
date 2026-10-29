@@ -13,11 +13,15 @@ k_init:
 	im 2
 	ld a,IM2_PAGE
 	ld i,a
-	; V9958: interrupts off (R#1 = $80: 16K, display off, IE0 off)
+	; V9958: interrupts off until v_init (R#0 = 0: IE1 off, R#1 = 0: IE0 off)
+	xor a
+	out (VDP_CTRL),a
 	ld a,$80
-	out ($99),a
+	out (VDP_CTRL),a
+	xor a
+	out (VDP_CTRL),a
 	ld a,$81
-	out ($99),a
+	out (VDP_CTRL),a
 	; clear kernel variables
 	ld hl,KVARS
 	ld b,0
@@ -43,8 +47,6 @@ ki_keys:
 	djnz ki_keys
 	ld a,$97
 	ld (cia2_pra),a
-	ld a,1
-	ld (page_back),a            ; page 0 is shown first
 	ld hl,$1234
 	ld (rnd_state),hl
 	; colour RAM starts as light blue like after a C64 reset
@@ -233,16 +235,22 @@ k_escape:
 	out (PORT_P1),a
 	jp (hl)
 
-; forget any interrupted renderer: mapping, busy flag, half-done V9990 command
+; forget any interrupted renderer or frame: mapping, busy flags, half-done
+; VDP command, status register selection, half-built palette schedule
 k_reset_ctx:
 	xor a
 	ld (rendering),a
 	ld (in_irq),a
-	ld (irq_late),a
-	ld a,52
-	out (V_SEL),a
+	ld (in_vbl),a
+	ld (ps_ready),a
+	ld (vdp_r15),a
+	out (VDP_CTRL),a
+	ld a,$AE                    ; R#46 = 0: STOP command
+	out (VDP_CTRL),a
 	xor a
-	out (V_REG),a               ; STOP command
+	out (VDP_CTRL),a
+	ld a,$8F                    ; R#15 = 0
+	out (VDP_CTRL),a
 	ld a,SEG_C2
 	ld (cur_p2),a
 	out (PORT_P2),a
@@ -266,191 +274,76 @@ k_restart:
 ; fatal error: red backdrop forever (debug_last/debug_code tell why)
 k_fatal:
 	di
-	ld a,PAL_BORDER*4
-	call v_palptr
-	ld a,31
-	out (V_PAL),a
+	ld a,PAL_BORDER
+	out (VDP_CTRL),a
+	ld a,$90                    ; R#16: palette pointer
+	out (VDP_CTRL),a
+	ld a,$70
+	out (VDP_PAL),a
 	xor a
-	out (V_PAL),a
-	out (V_PAL),a
+	out (VDP_PAL),a
 kf_loop:
 	jr kf_loop
 
 ; ============================================================================
 ; interrupts
 ; ============================================================================
-int_dispatch:
-	in a,(V_INT)
-	push af
-	and 3
-	cp 3
-	jr nz,id_normal
-	ld a,(sli_bord)
-	or a
-	jr z,id_normal
-	; vblank and the border-slot IRQ (top of the next frame) both pending:
-	; the vblank comes first, the C64 handler belongs to the next frame
-	pop af
-	call int_vblank
-	in a,(V_INT)
-	bit 1,a
-	ret z                       ; already served during the render
-	jp int_hline
-id_normal:
-	pop af
-	push af
-	bit 1,a
-	call nz,int_hline
-	pop af
-	bit 0,a
-	ret z
-	jp int_vblank
-
-int_hline:
-	ld a,2
-	out (V_INT),a
-	; the beam is at the armed line right now: restart the raster clock there
-	; (anchoring only at vblank lags whenever the vblank was served late)
-	xor a
-	out (TIMER_LO),a
-	ld hl,267                   ; border slot: V9990 line 222
-	ld a,(sli_bord)
-	or a
-	jr nz,ih_anchor
-	ld a,(VIC_REGS+$11)
-	rlca
-	and 1
-	ld h,a
-	ld a,(VIC_REGS+$12)
-	ld l,a
-ih_anchor:
-	ld (raster_base),hl
-	ld hl,(irq_count)
-	inc hl
-	ld (irq_count),hl
-	ld a,(vic_irr)
-	or 1
-	ld (vic_irr),a
-	ld a,(vic_imr)
-	and 1
-	ret z
-	ld a,(VIC_REGS+$12)
-	ld (irq_line),a
-	ld a,(VIC_REGS+$11)
-	rlca
-	and 1
-	ld (irq_line+1),a
-ih_again:
-	call tl_mark_irq
-	ld bc,0
-	ld de,0
-	ld a,($FFFE)
-	ld l,a
-	ld a,(vec_ffff)
-	ld h,a
-	ld a,1
-	ld (in_irq),a
-	call k_callc64
-	xor a
-	ld (in_irq),a
-	call tl_snapshot
-	; the handler armed a line that had already passed: serve it right away
-	; (the translated handler is slower than the C64 one; bands are 4 lines apart)
-	ld hl,irq_late
-	ld a,(hl)
-	or a
-	ret z
-	ld a,(sli_bord)
-	or a
-	jr z,ih_late
-	in a,(V_INT)
-	rrca
-	ret c                       ; vblank pending: it runs the border slot later
-ih_late:
-	ld (hl),0
-	ld a,(vic_imr)
-	and 1
-	ret z
-	ld a,(vic_irr)
-	or 1
-	ld (vic_irr),a
-	ld a,(VIC_REGS+$12)
-	ld (irq_line),a
-	ld a,(VIC_REGS+$11)
-	rlca
-	and 1
-	ld (irq_line+1),a
-	jr ih_again
-
+;
+; The V9958 has no raster counter and the MSX2+ no timer, so the C64 raster
+; IRQs are not run at their lines.  At each vblank the whole chain of handlers
+; for the coming frame runs at once, in line order, with in_irq set and
+; irq_line telling them where they are.  Their VIC changes go to the timeline
+; (the renderer draws each character row with the state of its lines), their
+; $D020-$D023 writes to a palette schedule that the line interrupt in
+; kernel_p0 plays back on the next frame (the road stripes).
+;
+; A Z80 needs well over a frame for one C64 frame, so frames are not run at
+; every vblank: the vblank handler runs the next one (then draws it) only when
+; nothing else is running and the C64 main code has had its turn: it polled
+; the raster, which it does when it waits for the next frame, or CHAIN_WAIT
+; vblanks have passed.  The game runs in slow motion rather than dropping
+; frames.  Sound, input and the palette run at every vblank.
+; ============================================================================
 int_vblank:
-	ld a,1
-	out (V_INT),a
-	; show the page the renderer finished
-	ld a,(flip_pending)
-	or a
-	jr z,ivb_noflip
+	ld a,(vdp_r15)
+	push af                     ; status register the interrupted code had selected
 	xor a
-	ld (flip_pending),a
-	ld (busy_vbls),a
-	; pages from a big redraw (screen change) stay hidden, see render.asm
-	ld a,8
-	out (V_SEL),a
-	ld hl,calm_flips
-	ld a,(hl)
-	or a
-	ld a,$C2                    ; display on
-	jr z,ivb_disp
-	ld a,(hl)
-	inc a
-	jr z,ivb_off                ; $FF: screen being built, stay blank
-	dec (hl)
-ivb_off:
-	ld a,$42                    ; display off (backdrop)
-ivb_disp:
-	out (V_REG),a
-ivb_flip:
-	ld a,17
-	out (V_SEL),a
-	xor a
-	out (V_REG),a               ; SCAY low
-	ld a,(page_back)
-	out (V_REG),a               ; SCAY bits 12-8: 0 or 1 (line 256)
-	xor 1
-	ld (page_back),a
-ivb_noflip:
-	xor a
-	out (TIMER_LO),a            ; raster clock restarts at C64 line 257
-	ld hl,257
-	ld (raster_base),hl
+	ld (vdp_r15),a              ; k_int left R#15 = 0
+	call pal_arm
+	call disp_update
 	ld hl,frame_count
 	inc (hl)
-	call vbl_catchup
+	ld a,1
+	ld (vr_sync),a
 	call read_input
 	call sound_frame
-	ld a,(rendering)
+	ld a,(in_vbl)
+	ld hl,rendering
+	or (hl)
+	jr nz,ivb_busy              ; we interrupted the frame or its drawing
+	ld a,(main_idle)
 	or a
-	jr z,ivb_swap
-	; renderer still busy: drop this frame's events and start over
-	ld a,(tl_write)
-	ld hl,tl_count
-	add a,l
-	ld l,a
-	ld (hl),0
-	call tl_clear_irq
-	call tl_base_snapshot
-	jp vbl_border
-ivb_swap:
-	; close this frame's timeline, open the next one
+	jr nz,ivb_run
+	ld hl,vbl_wait
+	inc (hl)
+	ld a,(hl)
+	cp CHAIN_WAIT
+	jr c,ivb_x                  ; the main code is still busy
+ivb_run:
+	xor a
+	ld (main_idle),a
+	ld (vbl_wait),a
+	inc a
+	ld (in_vbl),a
+	ei
+	call run_frame
+	di
+	xor a
+	ld (in_vbl),a
+	; the timeline just built goes to the renderer (it reads buffer tl_write^1)
 	ld a,(tl_write)
 	xor 1
 	ld (tl_write),a
-	ld hl,tl_count
-	add a,l
-	ld l,a
-	ld (hl),0
-	call tl_clear_irq
-	call tl_base_snapshot
-	call vbl_border
 	ld a,1
 	ld (rendering),a
 	ei
@@ -467,53 +360,99 @@ ivb_swap:
 	call k_map_c2
 	xor a
 	ld (rendering),a
+	inc a
+	ld (flip_pending),a
+	jr ivb_x
+ivb_busy:
+	ld hl,vbl_missed
+	inc (hl)
+ivb_x:
+	pop af
+	ld (vdp_r15),a
+	out (VDP_CTRL),a
+	ld a,$8F
+	out (VDP_CTRL),a
 	ret
 
-; A raster IRQ armed for a visible line that the beam has already passed was
-; missed (the line was programmed a moment too late): run the C64 handlers
-; now, at the bottom of the screen, so the chain keeps its 50 Hz rhythm.
-vbl_catchup:
-	ld b,16                     ; at most this many handlers
-vc_loop:
+; display on, or blank while a new screen is being built (see render.asm)
+disp_update:
+	ld a,(flip_pending)
+	or a
+	jr z,du_set
+	xor a
+	ld (flip_pending),a
+	ld a,(calm_flips)
+	or a
+	jr z,du_set
+	inc a
+	jr z,du_set                 ; $FF: until the renderer says so
+	sub 2
+	ld (calm_flips),a
+du_set:
+	ld a,(calm_flips)
+	or a
+	ld a,VR1_ON
+	jr z,du_w
+	ld a,VR1_OFF
+du_w:
+	out (VDP_CTRL),a
+	ld a,$81
+	out (VDP_CTRL),a
+	ret
+
+; the C64 raster IRQs of one frame, in line order
+run_frame:
+	ld a,(tl_write)
+	ld hl,tl_count
+	add a,l
+	ld l,a
+	ld (hl),0
+	call tl_clear_irq
+	call tl_base_snapshot       ; state at the top of the frame
+	call ps_begin
+	ld hl,-100                  ; below every line key
+	ld (chain_key),hl
+	ld b,24                     ; at most this many handlers
+rnf_loop:
 	ld a,(vic_imr)
 	and 1
-	ret z
-	ld a,(irq_late)
-	or a
-	jr z,vc_vis
-	ld a,(sli_bord)
-	or a
-	ret nz                      ; border slot: run after the timeline swap
-	jr vc_run                   ; armed after its line had passed
-vc_vis:
+	jr z,rnf_end
 	ld a,(VIC_REGS+$11)
 	rlca
 	and 1
 	ld h,a
 	ld a,(VIC_REGS+$12)
-	ld l,a
-	ld de,RASTER_OFS
+	ld l,a                      ; armed line
+	ld de,312
 	or a
 	sbc hl,de
-	ret c                       ; above the visible area: not due yet
-	ld de,257-RASTER_OFS
+	jr nc,rnf_end               ; past the last line: never raised
+	add hl,de
+	ld (irq_line),hl
+	; order key: lines from 257 on are the bottom border before the frame
+	ld de,257
 	or a
 	sbc hl,de
-	ret nc                      ; at or below the vblank line: not due yet
-vc_run:
+	jr c,rnf_vis
+	ld de,-55
+	add hl,de                   ; line - 312
+	jr rnf_key
+rnf_vis:
+	add hl,de
+rnf_key:
+	ld de,(chain_key)
+	push hl
+	or a
+	sbc hl,de
+	pop hl
+	jr z,rnf_end
+	jp m,rnf_end                ; not after the last one: next frame
+	ld (chain_key),hl
 	push bc
-	xor a
-	ld (irq_late),a             ; the handler may set it again
-	call tl_mark_irq
 	ld a,(vic_irr)
 	or 1
 	ld (vic_irr),a
-	ld a,(VIC_REGS+$12)
-	ld (irq_line),a
-	ld a,(VIC_REGS+$11)
-	rlca
-	and 1
-	ld (irq_line+1),a
+	call tl_mark_irq
 	ld bc,0
 	ld de,0
 	ld a,($FFFE)
@@ -527,20 +466,98 @@ vc_run:
 	ld (in_irq),a
 	call tl_snapshot
 	pop bc
-	djnz vc_loop
+	djnz rnf_loop
+rnf_end:
+	ld hl,(ps_wr)
+	ld (hl),$FF
+	ld a,1
+	ld (ps_ready),a
 	ret
 
-; the border-slot IRQ (C64 raster 0, top of the frame) was armed too late:
-; run it now that the new frame's timeline is open
-vbl_border:
-	ld a,(irq_late)
+; start a palette schedule: the live colours now are the top of the frame
+ps_begin:
+	xor a
+	ld (ps_ready),a
+	ld hl,(ps_build)
+	ld de,palette_shadow
+	ld c,4
+psb_l:
+	ld a,(de)
+	inc de
+	ld b,a
+	call ps_rgb
+	dec c
+	jr nz,psb_l
+	ld (ps_wr),hl
+	ld (hl),$FF
+	ret
+
+; C64 colour B -> its two V9958 palette bytes at HL, HL += 2 (keeps BC)
+ps_rgb:
+	push de
+	push hl
+	ld a,b
+	and $0F
+	add a,a
+	ld e,a
+	ld d,0
+	ld hl,c64_pal
+	add hl,de
+	ld e,(hl)
+	inc hl
+	ld d,(hl)
+	pop hl
+	ld (hl),e
+	inc hl
+	ld (hl),d
+	inc hl
+	pop de
+	ret
+
+; at vblank: the newest complete schedule goes on screen (the old one again
+; when the chain is still running), top colours now, line interrupt armed
+pal_arm:
+	ld a,(ps_ready)
 	or a
-	ret z
-	ld a,(sli_bord)
-	or a
-	ret z
-	ld b,1
-	jp vc_run
+	jr z,pa_arm
+	xor a
+	ld (ps_ready),a
+	ld hl,(ps_active)
+	ld de,(ps_build)
+	ld (ps_active),de
+	ld (ps_build),hl
+pa_arm:
+	ld hl,(ps_active)
+	xor a
+	out (VDP_CTRL),a
+	ld a,$90
+	out (VDP_CTRL),a            ; palette pointer 0
+	ld bc,8*256+VDP_PAL
+	otir
+	ld (ps_ptr),hl
+	ld a,(hl)
+	cp $FF
+	ld a,VR0_G6
+	jr z,pa_r0
+	ld a,(hl)
+	out (VDP_CTRL),a
+	ld a,$93                    ; R#19
+	out (VDP_CTRL),a
+	ld a,1
+	out (VDP_CTRL),a
+	ld a,$8F
+	out (VDP_CTRL),a
+	in a,(VDP_CTRL)             ; drop a line match from before
+	xor a
+	out (VDP_CTRL),a
+	ld a,$8F
+	out (VDP_CTRL),a
+	ld a,VR0_G6_IE1
+pa_r0:
+	out (VDP_CTRL),a
+	ld a,$80
+	out (VDP_CTRL),a
+	ret
 
 ; ---- timeline --------------------------------------------------------------
 tl_clear_irq:
@@ -794,44 +811,49 @@ iord_d01f:
 	ret
 
 ; current C64 raster line -> HL (0..311).  Clobbers A.
+; An IRQ handler is at the line it was raised for.  Main code has no beam to
+; look at: it sees a virtual one that moves 8 lines per read from the bottom
+; border through every value the game polls for (bit 8, 0, $30, above $F0)
+; and then stays at line 257 until a vblank has passed.  A sweep is never cut
+; short: the main code may get only a few reads per frame.
 get_raster:
+	ld a,(in_irq)
+	or a
+	jr z,gr_main
+	ld hl,(irq_line)
+	ret
+gr_main:
+	ld a,1
+	ld (main_idle),a
 	push de
-	in a,(TIMER_HI)
-	ld h,a
-	in a,(TIMER_LO)
-	ld l,a
-	in a,(TIMER_HI)
-	cp h
-	jr z,gr_ok
-	ld h,a
-	in a,(TIMER_LO)
-	ld l,a
-gr_ok:
-	; lines = t/16 - t/1024 (3.911us ticks, 63.7us lines)
-	ld a,h
-	rrca
-	rrca
-	and $3F
-	ld e,a
-	ld d,0
-	srl h
-	rr l
-	srl h
-	rr l
-	srl h
-	rr l
-	srl h
-	rr l
+	ld hl,(vr_line)
+	ld de,257
 	or a
 	sbc hl,de
-	ld de,(raster_base)
+	add hl,de
+	jr nz,gr_next               ; sweeping
+	ld a,(vr_sync)
+	or a
+	jr z,gr_x                   ; waiting for a vblank
+	xor a
+	ld (vr_sync),a
+	dec hl                      ; 256
+gr_next:
+	ld de,8
 	add hl,de
 	ld de,312
-gr_wrap:
 	or a
 	sbc hl,de
-	jr nc,gr_wrap
+	jr z,gr_set                 ; 312 -> 0
 	add hl,de
+	ld a,h
+	dec a
+	or l
+	jr nz,gr_set
+	inc hl                      ; 256 -> 257
+gr_set:
+	ld (vr_line),hl
+gr_x:
 	pop de
 	ret
 
@@ -985,16 +1007,15 @@ iowr_d011:
 	call k_get_iff
 	push af
 	di
-	ld a,8
-	out (V_SEL),a
-	ld a,$42                    ; blank right now, not at the next page flip
-	out (V_REG),a
+	ld a,VR1_OFF                ; blank right now, not at the next vblank
+	out (VDP_CTRL),a
+	ld a,$81
+	out (VDP_CTRL),a
 	pop af
 	or a
 	jr z,iowr_d012
 	ei
-iowr_d012:
-	call set_line_irq
+iowr_d012:                      ; the line is read by run_frame
 	pop af
 	ret
 iowr_d019:
@@ -1019,10 +1040,11 @@ iowr_changed:
 	pop af
 	ret
 
+;
 ; set live palette slot A (0..3) to C64 colour H.  Preserves BC, DE.
-; The live slots are written into the palette bank that is not on screen,
-; then R#13/R#15 switch to it: the beam never sees a half-written colour
-; (R, G and B arrive one by one, so red->white would flash yellow).
+; An IRQ handler's write is played back by the line interrupt at its display
+; line (palette schedule, see run_frame); main code's shows from the next
+; frame on.
 k_setlive:
 	push bc
 	push de
@@ -1035,144 +1057,51 @@ k_setlive:
 	add a,c
 	ld l,a
 	ld (hl),b
-	call k_get_iff
-	push af
-	di
-	ld a,(pal_bank)
-	xor 1
-	ld (pal_bank),a
-	rrca
-	rrca
-	ld c,a                      ; bank * 64: palette pointer of its slot 0
-	ld a,14
-	out (V_SEL),a
-	ld a,c
-	out (V_REG),a
-	ld hl,palette_shadow
-	ld b,4
-ksl_slot:
-	ld a,(hl)
-	inc hl
-	push hl
-	ld l,a
-	add a,a
-	add a,l
-	ld l,a
-	ld h,0
-	ld de,c64_rgb
-	add hl,de
-	ld a,(hl)
-	out (V_PAL),a
-	inc hl
-	ld a,(hl)
-	out (V_PAL),a
-	inc hl
-	ld a,(hl)
-	out (V_PAL),a
-	pop hl
-	djnz ksl_slot
-	ld a,c
-	rrca
-	rrca
-	ld c,a                      ; bank * 16
-	ld a,13
-	out (V_SEL),a
-	ld a,c
-	rrca
-	rrca
-	out (V_REG),a               ; PLTO5-4: bank
-	ld a,15
-	out (V_SEL),a
-	ld a,c
-	or PAL_BORDER
-	out (V_REG),a               ; backdrop follows the bank
-	pop af
+	ld a,(in_irq)
 	or a
-	jp z,ksl_di
-	ei
-ksl_di:
+	jr z,ksl_x
+	ld hl,(irq_line)
+	ld de,RASTER_OFS+1
+	or a
+	sbc hl,de                   ; display line - 1
+	jr c,ksl_top
+	ld a,h
+	or a
+	jr nz,ksl_top
+	ld a,l
+	cp 211
+	jr nc,ksl_top               ; bottom border: before the next frame
+	inc a
+	push af
+	ld hl,(ps_wr)
+	ld de,(ps_build)
+	or a
+	sbc hl,de
+	ld de,8+4*PS_MAX
+	sbc hl,de
+	pop af
+	jr nc,ksl_x                 ; full
+	ld hl,(ps_wr)
+	ld (hl),a                   ; display line
+	inc hl
+	ld (hl),c                   ; slot
+	inc hl
+	call ps_rgb
+	ld (hl),$FF
+	ld (ps_wr),hl
+	jr ksl_x
+ksl_top:
+	; above the display: part of the colours at the top of the frame
+	ld hl,(ps_build)
+	ld a,c
+	add a,a
+	ld e,a
+	ld d,0
+	add hl,de
+	call ps_rgb
+ksl_x:
 	pop de
 	pop bc
-	ret
-
-; program the V9990 line interrupt from the C64 raster compare value
-set_line_irq:
-	push de
-	ld a,(VIC_REGS+$11)
-	rlca
-	and 1
-	ld h,a
-	ld a,(VIC_REGS+$12)
-	ld l,a
-	; v = c - RASTER_OFS for RASTER_OFS <= c <= 301, else 256
-	ld de,RASTER_OFS
-	or a
-	sbc hl,de
-	jr c,sli_border
-	ld de,257
-	or a
-	sbc hl,de
-	jr nc,sli_border
-	add hl,de
-	jr sli_set
-sli_border:
-	ld hl,222                   ; bottom border, well before the next frame
-	ld a,1
-	jr sli_set2
-sli_set:
-	xor a
-sli_set2:
-	ld (sli_bord),a
-	call k_get_iff
-	push af
-	di
-	ld a,10
-	out (V_SEL),a
-	ld a,l
-	out (V_REG),a
-	ld a,h
-	out (V_REG),a
-	pop af
-	or a
-	jp z,sli_di
-	ei
-sli_di:
-	; has the beam already passed the compare line (by less than 24 lines)?
-	call get_raster              ; HL = current line
-	ld a,(sli_bord)
-	or a
-	jr z,sli_vis
-	; border slot (V9990 line 222 = C64 267): late if the beam is past it
-	ld de,267
-	or a
-	sbc hl,de
-	jr c,sli_ok
-	jr sli_late
-sli_vis:
-	ld a,(VIC_REGS+$11)
-	rlca
-	and 1
-	ld d,a
-	ld a,(VIC_REGS+$12)
-	ld e,a
-	dec de                      ; a line counts as passed while the beam is on it
-	or a
-	sbc hl,de                   ; current - (compare - 1)
-	jr c,sli_ok
-	ld a,h
-	or a
-	jr nz,sli_ok
-	ld a,l
-	cp 24
-	jr nc,sli_ok
-sli_late:
-	ld a,1
-	jr sli_x
-sli_ok:
-	xor a                       ; the last arming decides: an earlier D011/D012
-sli_x:                          ; write of the same handler may have looked late
-	ld (irq_late),a
-	pop de
 	ret
 
 ; ---- SID ----------------------------------------------------------------
@@ -1224,95 +1153,86 @@ isid_x:
 	ret
 
 ; ============================================================================
-; V9990
+; V9958
 ; ============================================================================
-; set V9990 palette pointer to A (palette*4)
-v_palptr:
-	push af
-	ld a,14
-	out (V_SEL),a
-	pop af
-	out (V_REG),a
-	ret
-
-; write register A with value L
-v_wreg:
-	out (V_SEL),a
-	ld a,l
-	out (V_REG),a
-	ret
-
+; GRAPHIC 6 (SCREEN 7: 512x212, 16 colours), PAL 50 Hz, VRAM cleared,
+; palette black, empty palette schedules.  Interrupts are off.
 v_init:
-	ld a,2                      ; reset
-	out (V_SYS),a
-	xor a
-	out (V_SYS),a               ; MCS=0: XTAL1 21.5 MHz
 	ld hl,v_init_regs
 vi_loop:
 	ld a,(hl)
 	cp $FF
-	jr z,vi_regs_done
+	jr z,vi_pal
 	inc hl
-	out (V_SEL),a
+	ld c,a
 	ld a,(hl)
 	inc hl
-	out (V_REG),a
+	out (VDP_CTRL),a
+	ld a,c
+	or $80
+	out (VDP_CTRL),a
 	jr vi_loop
-vi_regs_done:
-	; palette: live slots + fixed slots start black
-	xor a
-	call v_palptr
-	ld b,64*3
 vi_pal:
 	xor a
-	out (V_PAL),a
-	djnz vi_pal
-	; clear all 512K of VRAM with linear writes
+	out (VDP_CTRL),a
+	ld a,$90
+	out (VDP_CTRL),a
+	ld b,32
 	xor a
-	out (V_SEL),a
-	out (V_REG),a
-	out (V_REG),a
-	out (V_REG),a
-	ld de,2048
+vi_p:
+	out (VDP_PAL),a
+	djnz vi_p
+	; all 128K of VRAM (the address counter carries into R#14)
+	out (VDP_CTRL),a
+	ld a,$8E
+	out (VDP_CTRL),a
+	xor a
+	out (VDP_CTRL),a
+	ld a,$40
+	out (VDP_CTRL),a
+	ld de,512
 vi_clr:
-	ld b,0
 	xor a
+	ld b,a
 vi_clr2:
-	out (V_VRAM),a
+	out (VDP_DATA),a
 	djnz vi_clr2
 	dec de
 	ld a,d
 	or e
 	jr nz,vi_clr
-	; interrupt line 256 until the game sets one
-	ld hl,256
-	ld a,10
-	out (V_SEL),a
-	ld a,l
-	out (V_REG),a
-	ld a,h
-	out (V_REG),a
-	ld a,7
-	out (V_INT),a
+	; palette schedules: black top colours, no entries
+	ld hl,PSCHED0
+	ld (ps_active),hl
+	call vi_ps
+	ld (ps_ptr),hl
+	ld hl,PSCHED1
+	ld (ps_build),hl
+vi_ps:
+	ld b,8
+vi_ps1:
+	ld (hl),0
+	inc hl
+	djnz vi_ps1
+	ld (hl),$FF
 	ret
 v_init_regs:
-	db 6, $95                   ; B3: bitmap, XTAL1, 512 px, 4 bpp
-	db 7, $08                   ; PAL, non interlaced
-	db 8, $C2                   ; display on, cursor off
-	db 9, $03                   ; line + vblank interrupts
-	db 13, $00                  ; palette mode, offset 0
-	db 15, PAL_BORDER           ; backdrop
-	db 16, $00
-	db 17, 0, 18, 0, 19, 0, 20, 0
-	db 25, 0, 26, 0, 27, 0, 28, 0
+	db 0, VR0_G6
+	db 1, VR1_ON
+	db 2, $1F                   ; page 0 on screen
+	db 7, PAL_BORDER            ; backdrop
+	db 8, $2A                   ; colour 0 is a colour, 64K chips, sprites off
+	db 9, $82                   ; 212 lines, PAL 50 Hz
+	db 10, 0, 14, 0, 15, 0, 16, 0, 18, 0, 19, 0, 23, 0
+	db 25, 0, 26, 0, 27, 0      ; V9958: no YJK, no horizontal scroll
 	db $FF
 
-; C64 colours (Pepto) as V9990 5-bit R,G,B
-c64_rgb:
-	db  0, 0, 0,  31,31,31,  21, 7,11,  15,30,26
-	db 21, 8,30,  12,26, 6,   5, 7,29,  31,31, 8
-	db 24,13, 3,  15,10, 0,  30,16,16,  12,12,12
-	db 18,18,18,  20,31,16,  14,16,31,  25,25,25
+; C64 colours (Pepto) as V9958 palette bytes: $RB, $0G (3 bits each)
+c64_pal:
+	db $00,$00, $77,$07, $52,$02, $36,$07
+	db $57,$02, $31,$06, $17,$02, $72,$07
+	db $51,$03, $30,$02, $74,$04, $33,$03
+	db $44,$04, $54,$07, $37,$04, $66,$06
 
 ; ============================================================================
 ; input (once per frame)
@@ -1396,6 +1316,19 @@ pi_l:
 	out ($A0),a
 	ld a,$BF                    ; all off, port A input / B output
 	out ($A1),a
+	; period cache: frequency 0 is the lowest tone
+	ld hl,sid_pcache
+	ld b,3
+pi_c:
+	ld (hl),0
+	inc hl
+	ld (hl),0
+	inc hl
+	ld (hl),$FF
+	inc hl
+	ld (hl),$0F
+	inc hl
+	djnz pi_c
 	ret
 
 psg_write:                      ; register A, value L
@@ -1432,7 +1365,7 @@ sf_voice:
 	; tone period = 1905600 / F
 	ld l,(ix+0)
 	ld h,(ix+1)
-	call sid_period             ; HL = PSG period (12 bit)
+	call sf_period              ; HL = PSG period (12 bit)
 	ld a,c
 	add a,a
 	push hl
@@ -1504,25 +1437,70 @@ sfb_s:
 	add a,a
 	jr sfb_l
 
-; A*H/16 with A,H in 0..16 -> A
+; A*H/16 with A in 0..15, H in 1..16 -> A
 mul4x4:
 	push bc
-	ld b,h
 	ld c,a
 	xor a
-	inc b
+	ld b,5
 m44_l:
-	dec b
-	jr z,m44_d
+	srl h
+	jr nc,m44_n
 	add a,c
-	jr m44_l
-m44_d:
+m44_n:
+	sla c
+	djnz m44_l
 	rrca
 	rrca
 	rrca
 	rrca
 	and $0F
 	pop bc
+	ret
+
+; HL = SID frequency of voice C -> HL = PSG period; the division only runs
+; when the frequency changed
+sf_period:
+	push de
+	ld a,c
+	add a,a
+	add a,a
+	add a,sid_pcache & 255
+	ld e,a
+	ld d,sid_pcache/256
+	ld a,(de)
+	cp l
+	jr nz,sfp_new
+	inc de
+	ld a,(de)
+	dec de
+	cp h
+	jr nz,sfp_new
+	inc de
+	inc de
+	ld a,(de)
+	ld l,a
+	inc de
+	ld a,(de)
+	ld h,a
+	pop de
+	ret
+sfp_new:
+	ld a,l
+	ld (de),a
+	inc de
+	ld a,h
+	ld (de),a
+	inc de
+	push de
+	call sid_period
+	pop de
+	ld a,l
+	ld (de),a
+	inc de
+	ld a,h
+	ld (de),a
+	pop de
 	ret
 
 ; HL = SID frequency -> HL = PSG tone period (1905600 / F, clamped to 12 bit)

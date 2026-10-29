@@ -1,4 +1,4 @@
-; Shared constants for the MSX turbo R / V9990 port of C64 Buggy Boy.
+; Shared constants for the MSX2+ / V9958 port of C64 Buggy Boy.
 
 ; ---- memory mapper ----------------------------------------------------------
 PORT_P0:         equ $FC
@@ -14,28 +14,26 @@ SEG_CODE:        equ 8               ; first translated code segment
 SEG_RENDER:      equ 12              ; renderer code + tables (mapped in page 1)
 SEG_SHADOW:      equ 13              ; renderer: last drawn cell inputs (mapped in page 3)
 
-; ---- V9990 (Gfx9000) --------------------------------------------------------
-V_VRAM:          equ $60             ; P#0 VRAM data
-V_PAL:           equ $61             ; P#1 palette data
-V_CMD:           equ $62             ; P#2 command data
-V_REG:           equ $63             ; P#3 register data
-V_SEL:           equ $64             ; P#4 register select
-V_STAT:          equ $65             ; P#5 status
-V_INT:           equ $66             ; P#6 interrupt flags
-V_SYS:           equ $67             ; P#7 system control
-
-; ---- turbo R system timer (3.911 us per tick) ------------------------------
-TIMER_LO:        equ $E6
-TIMER_HI:        equ $E7
+; ---- V9958 -------------------------------------------------------------------
+VDP_DATA:        equ $98             ; VRAM data
+VDP_CTRL:        equ $99             ; register writes, address set-up, status reads
+VDP_PAL:         equ $9A             ; palette data
+VDP_IND:         equ $9B             ; indirect register writes (R#17)
+VR0_G6:          equ $0A             ; R#0: GRAPHIC 6 (SCREEN 7), line interrupt off
+VR0_G6_IE1:      equ $1A             ; R#0: GRAPHIC 6, line interrupt on
+VR1_ON:          equ $60             ; R#1: display on, vblank interrupt on
+VR1_OFF:         equ $20             ; R#1: display blanked, vblank interrupt on
 
 ; ---- display geometry -------------------------------------------------------
-; C64 raster line c is shown on V9990 display line c-RASTER_OFS.
+; C64 raster line c is shown on V9958 display line c-RASTER_OFS.
 RASTER_OFS:      equ 45
-SCREEN_X:        equ 16              ; V9990 x of C64 pixel column 0
-SCREEN_Y:        equ 6               ; V9990 y of C64 raster line 51
-CLEAN_Y:         equ 512             ; y of the sprite-free playfield copy
-SPRITE_CACHE_Y:  equ 768             ; y of the sprite shape cache
-; display pages at y 0 and 256 (double buffered)
+SCREEN_X:        equ 16              ; V9958 x of C64 pixel column 0
+SCREEN_Y:        equ 6               ; V9958 y of C64 raster line 51
+CLEAN_Y:         equ 256             ; y of the sprite-free playfield copy (page 1)
+; display at y 0 (page 0); sprite shape cache in the unseen lines 212-253 of
+; both pages (SC_Y0, SC_Y1)
+SC_Y0:           equ 212
+SC_Y1:           equ 256+212
 
 ; palette slots
 PAL_BG0:         equ 0               ; $D021 (live)
@@ -80,18 +78,27 @@ debug_code:      equ KVARS+$B2
 irq_count:       equ KVARS+$B4       ; 2 bytes
 vbl_pending:     equ KVARS+$B6
 cur_p3:          equ KVARS+$B7       ; mapper segment in page 3
-irq_late:        equ KVARS+$B8       ; raster line armed after it had passed
 lu_cache:        equ KVARS+$B9       ; 5: last k_lookup (C64 addr, seg, Z80 addr)
-page_back:       equ KVARS+$BE       ; display page being drawn (0/1)
-flip_pending:    equ KVARS+$BF       ; back page complete: show it at vblank
+flip_pending:    equ KVARS+$BF       ; the renderer finished a frame
 tl_hadirq:       equ KVARS+$C0       ; 2: a C64 IRQ ran in timeline buffer 0/1
-busy_vbls:       equ KVARS+$C2       ; vblanks the renderer has been busy for
-calm_flips:      equ KVARS+$C3       ; page flips to keep blank ($FF: until the renderer says so)
+calm_flips:      equ KVARS+$C3       ; rendered frames to keep blank ($FF: until the renderer says so)
 in_irq:          equ KVARS+$C4       ; a C64 IRQ handler is running
 blank_req:       equ KVARS+$C5       ; main code changed the display mode: new screen coming
-sli_bord:        equ KVARS+$C6       ; the armed raster line is the border slot
-pal_bank:        equ KVARS+$C7       ; palette bank on screen (0/1, R#13 offset)
-raster_base:     equ KVARS+$C8       ; 2: C64 line at the last raster clock restart
+vr_line:         equ KVARS+$C6       ; 2: virtual raster line seen by main code
+vr_sync:         equ KVARS+$C8       ; a vblank happened: virtual raster restarts
+vdp_r15:         equ KVARS+$C9       ; R#15 (status register) the main code selected
+in_vbl:          equ KVARS+$CA       ; the vblank handler is running the C64 IRQs
+vbl_missed:      equ KVARS+$CB       ; vblanks that came while it was still busy
+ps_active:       equ KVARS+$CC       ; 2: palette schedule on screen
+ps_build:        equ KVARS+$CE       ; 2: palette schedule being built
+ps_wr:           equ KVARS+$D0       ; 2: write pointer into ps_build
+ps_ptr:          equ KVARS+$D2       ; 2: next entry for the line interrupt
+ps_ready:        equ KVARS+$D4       ; ps_build is complete
+chain_key:       equ KVARS+$D5       ; 2: line order key of the last IRQ run this frame
+main_idle:       equ KVARS+$D7       ; main code polled the raster (it waits for a frame)
+vbl_wait:        equ KVARS+$D8       ; vblanks since the last frame while it was busy
+CHAIN_WAIT:      equ 4               ; ... after which the next frame runs anyway
+sid_pcache:      equ KVARS+$D9       ; 12: per voice last SID frequency, its PSG period
 
 ; timeline: two buffers of TL_MAX records of 64 bytes (in two separate holes)
 TIMELINE:        equ $3100
@@ -105,3 +112,10 @@ IM2_PAGE:        equ $27             ; IM2 vector at $27FF/$2800
 LOOKUP_HASH:     equ $F800           ; 128 x 6: C64 addr, seg, Z80 addr (build.py fills it)
 LOOKUP_SLOTS:    equ 128
 TL_BASE:         equ $1800           ; base record (frame start state) for each timeline buffer
+
+; palette schedules (two, see k_setlive): 8 bytes of V9958 colour data for the
+; live slots 0-3 at the top of the frame, then entries (display line, slot,
+; colour byte 1, colour byte 2) in line order, ended by line $FF
+PSCHED0:         equ $1A00
+PSCHED1:         equ $1B80
+PS_MAX:          equ 90              ; entries per schedule

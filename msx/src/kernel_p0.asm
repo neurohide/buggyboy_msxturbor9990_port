@@ -14,8 +14,85 @@
 region_im2_start:
 	dw k_int
 
+; Line interrupts only apply the palette schedule (road stripes) and must be
+; quick: they use page 0 alone, whatever the other pages hold.
 k_int:
 	push af
+	ld a,1
+	out (VDP_CTRL),a
+	ld a,$8F
+	out (VDP_CTRL),a
+	in a,(VDP_CTRL)             ; S#1: bit 0 = line interrupt (cleared by the read)
+	rrca
+	jr nc,ki_frame
+	push hl
+	push bc
+	ld hl,(ps_ptr)
+	ld a,(hl)
+	inc a
+	jr z,kil_done               ; schedule already finished
+kil_grp:
+	ld b,(hl)                   ; line of this group of entries
+kil_ent:
+	inc hl
+	ld a,(hl)                   ; slot
+	inc hl
+	out (VDP_CTRL),a
+	ld a,$90                    ; R#16: palette pointer
+	out (VDP_CTRL),a
+	ld a,(hl)
+	inc hl
+	out (VDP_PAL),a
+	ld a,(hl)
+	inc hl
+	out (VDP_PAL),a
+	ld a,(hl)                   ; next entry's line
+	cp b
+	jr z,kil_ent
+	ld (ps_ptr),hl
+	cp $FF
+	jr z,kil_off
+	sub b
+	cp 3
+	jr c,kil_grp                ; at most 2 lines on: the interrupt would be late
+	ld a,(hl)
+	out (VDP_CTRL),a
+	ld a,$93                    ; R#19: next interrupt line
+	out (VDP_CTRL),a
+	jr kil_done
+kil_off:
+	ld a,VR0_G6
+	out (VDP_CTRL),a
+	ld a,$80
+	out (VDP_CTRL),a
+kil_done:
+	ld a,(vdp_r15)
+	out (VDP_CTRL),a
+	ld a,$8F
+	out (VDP_CTRL),a
+	pop bc
+	pop hl
+	pop af
+	ei
+	reti
+
+ki_frame:
+	xor a
+	out (VDP_CTRL),a
+	ld a,$8F
+	out (VDP_CTRL),a
+	in a,(VDP_CTRL)             ; S#0: bit 7 = vblank (cleared by the read)
+	rlca
+	jr c,ki_vbl
+	ld a,(vdp_r15)
+	out (VDP_CTRL),a
+	ld a,$8F
+	out (VDP_CTRL),a
+	pop af
+	ei
+	reti
+
+ki_vbl:
 	push bc
 	push de
 	push hl
@@ -41,7 +118,7 @@ k_int:
 	ld a,SEG_C3
 	ld (cur_p3),a
 	out (PORT_P3),a
-	call int_dispatch           ; page-2 kernel
+	call int_vblank             ; page-2 kernel
 	pop af
 	ld (cur_p3),a
 	out (PORT_P3),a

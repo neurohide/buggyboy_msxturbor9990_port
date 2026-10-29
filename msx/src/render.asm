@@ -1,15 +1,20 @@
-; VIC-II -> V9990 renderer.  Lives in its own mapper segment (SEG_RENDER),
-; mapped into page 1 and called once per frame from the V9990 vblank
-; interrupt with interrupts enabled (C64 raster IRQs may nest).
+; VIC-II -> V9958 renderer.  Lives in its own mapper segment (SEG_RENDER),
+; mapped into page 1 and called from the vblank interrupt with interrupts
+; enabled (the next vblanks may nest: they run the C64 IRQs of later frames).
 ;
-; V9990 B3 mode, 512x212, 4 bpp.  One C64 multicolour pixel becomes three
-; V9990 pixels (one hires pixel 1.5), so the 320 pixel C64 screen is 480
-; pixels wide, which matches the C64's pixel aspect closely.
+; GRAPHIC 6 (SCREEN 7), 512x212, 4 bpp.  One C64 multicolour pixel becomes
+; three V9958 pixels (one hires pixel 1.5), so the 320 pixel C64 screen is
+; 480 pixels wide, which matches the C64's pixel aspect closely.
 ;
-;   y 0..211     display
-;   y 256..467   clean playfield (no sprites); dirty cells are drawn here
-;                and copied to the display, sprites are erased from here
-;   y 512..      sprite shape cache, 7 slots of 72x42 per row
+;   y 0..211     display (page 0, the only one shown: no double buffering)
+;   y 212..253   sprite shape cache, 7 slots of 72x42
+;   y 256..467   clean playfield (no sprites): dirty cells are written here by
+;                the CPU and copied to the display by the VDP; sprites are
+;                erased from here
+;   y 468..509   sprite shape cache, 7 more slots
+;
+; Everything that writes the VDP's port $99 twice runs with interrupts off:
+; the line interrupt (palette) and the vblank use the same port.
 ;
 ; While rendering, the VIC bank is mapped in page 2: C64 $4000 = Z80 $8000.
 
@@ -22,10 +27,9 @@ NT:              equ $7000           ; nibble table: 16 x 3 bytes
 BUF:             equ $7100           ; cell pixels, line-major, up to 40 cells
 VDW:             equ $7900           ; work copy of VDIRTY
 CHDIRTY:         equ $7A00           ; per character code
-SCACHE:          equ $7B00           ; sprite cache: 128 slots x 16 bytes ($7B00-$82FF!)
+SCACHE:          equ $7B00           ; sprite cache: 14 slots x 16 bytes (see sp_cache)
 RV:              equ $7F00           ; misc variables (overlaps nothing below $7F00)
-; SCACHE only uses 64 slots so that it stays below RV.
-SC_SLOTS:        equ 64
+SC_SLOTS:        equ 14              ; 2 rows of 7 in VRAM
 
 cdw:             equ RV+$00          ; 16
 row_full:        equ RV+$10          ; 25
@@ -52,7 +56,7 @@ celldirty:       equ RV+$59          ; 40
 tl_ptr:          equ RV+$81          ; 2: next event record
 tl_left:         equ RV+$83          ; events left
 rec_cur:         equ RV+$84          ; 2
-cmdblk:          equ RV+$86          ; 21: R#32..R#52
+cmdblk:          equ RV+$86          ; 15: R#32..R#46
 spr_n:           equ RV+$9B          ; sprites drawn this frame
 spr_tmp:         equ RV+$D0          ; 32 scratch
 rgn_rec:         equ RV+$A5          ; 2 record of the sprite region
@@ -60,6 +64,7 @@ rgn_lo:          equ RV+$A7          ; 2 first raster line of region
 rgn_hi:          equ RV+$A9          ; 2 first raster line after region
 coll_acc:        equ RV+$AB
 rgn_idx:         equ RV+$AC
+sc_frame:        equ RV+$AD          ; sprite cache clock (one tick per frame)
 dbg_cells:       equ RV+$F0          ; 2: cells drawn last frame
 dbg_full:        equ RV+$F2          ; rows fully redrawn last frame
 dbg_cnt:         equ RV+$F3          ; 2: running cell count
@@ -151,14 +156,11 @@ rf1:
 	ld (hl),1
 	inc hl
 	djnz rf1
-	; border colour around the C64 screen in all three buffers
+	; border colour around the C64 screen on the display and the clean copy
 	ld hl,0
 	call border_fill
-	ld hl,256
-	call border_fill
 	ld hl,CLEAN_Y
-	call border_fill
-	ret
+	jp border_fill
 
 ; HL = y origin of a buffer: fill everything outside the 480x200 window
 border_fill:
@@ -192,15 +194,41 @@ border_fill:
 	jp fill_rect_hl
 fill_rect_y:                    ; same as fill_rect_hl, y in HL
 fill_rect_hl:
-	; DE = x, HL = y, BC = width, A = height; colour PAL_BORDER
+	; DE = x, HL = y, BC = width (even, 512 only from x 0), A = height;
+	; colour PAL_BORDER
 	ld (cmdblk+4),de
 	ld (cmdblk+6),hl
-	ld (cmdblk+8),bc
 	ld (cmdblk+10),a
 	xor a
 	ld (cmdblk+11),a
+	ld a,b
+	cp 2
+	jr c,frh_one
+	ld hl,256                   ; NX has 9 bits: two halves
+	ld (cmdblk+8),hl
+	call frh_go
+	ld a,1
+	ld (cmdblk+5),a             ; x 256
+	jr frh_go
+frh_one:
+	ld (cmdblk+8),bc
+frh_go:
 	ld a,PAL_BORDER*$11
-	jp lmmv
+	jp hmmv
+
+; the same rectangle on the clean copy (HL = its y) and on the display
+fill_both:
+	push af
+	push bc
+	push de
+	push hl
+	call fill_rect_hl
+	pop hl
+	dec h                       ; y - 256
+	pop de
+	pop bc
+	pop af
+	jp fill_rect_hl
 
 ; ============================================================================
 ; timeline
@@ -1048,8 +1076,7 @@ row_blank:
 	ld de,SCREEN_X
 	ld bc,480
 	ld a,8
-	call fill_rect_hl
-	ret
+	jp fill_both
 
 ; A = row -> HL = y in the clean buffer
 row_y_clean:
@@ -1097,7 +1124,8 @@ dr_cell:
 	pop bc
 	inc c
 	djnz dr_cell
-	; LMMC: x = SCREEN_X + 12*start + xoff, y = clean row
+	; x = SCREEN_X + 12*start + xoff (even: byte writes; at worst 1/3 of a
+	; C64 multicolour pixel off), y = clean row
 	ld a,(run_start)
 	ld l,a
 	ld h,0
@@ -1110,13 +1138,21 @@ dr_cell:
 	ld de,SCREEN_X
 	add hl,de
 	ld a,(row_xoff)
+	and $FE
 	ld e,a
 	ld d,0
 	add hl,de
-	ld (cmdblk+4),hl
+	ld (cmdblk+0),hl            ; SX
+	ld (cmdblk+4),hl            ; DX
+	srl h
+	rr l
+	ld a,l
+	ld (spr_tmp+20),a           ; x byte
 	ld a,(cur_row)
 	call row_y_clean
-	ld (cmdblk+6),hl
+	ld (cmdblk+2),hl            ; SY
+	dec h
+	ld (cmdblk+6),hl            ; DY: display
 	ld a,(run_len)
 	ld l,a
 	ld h,0
@@ -1129,17 +1165,26 @@ dr_cell:
 	ld (cmdblk+8),hl
 	ld hl,8
 	ld (cmdblk+10),hl
-	call lmmc_start
-	ld hl,BUF
-	ld a,(stride)
-	ld d,a
-	ld e,8
+	; the pixels into the clean copy, line by line
+	ld hl,(cmdblk+2)
+	ld de,BUF
+	ld c,8
 dr_send:
-	ld b,d
-	ld c,V_CMD
+	push bc
+	ld a,(spr_tmp+20)
+	call vram_wr
+	ld a,(stride)
+	ld b,a
+	ld c,VDP_DATA
+	ex de,hl
 	otir
-	dec e
+	ex de,hl
+	inc hl
+	pop bc
+	dec c
 	jr nz,dr_send
+	; and on to the display
+	call hmmm
 	jp csel_fix
 
 ; 38-column mode: border over the outer columns of this row
@@ -1166,12 +1211,12 @@ csf_do:
 	ld de,SCREEN_X
 	ld bc,12                    ; 7 C64 pixels -> 10.5, round up
 	ld a,8
-	call fill_rect_hl
+	call fill_both
 	pop hl
 	ld de,SCREEN_X+480-14       ; 9 C64 pixels -> 13.5
 	ld bc,512-(SCREEN_X+480-14)
 	ld a,8
-	jp fill_rect_hl
+	jp fill_both
 
 ; ============================================================================
 ; colours of cell C of the current row -> cell_cols; HL = pixel source
@@ -1327,58 +1372,29 @@ fs_have:
 	dec a
 	push af
 	; program the palette entry
-	ld b,a
 	ld l,c
-	ld a,l
-	add a,a
-	add a,l
-	ld l,a
 	ld h,0
+	add hl,hl
 	push de
-	ld de,r_c64_rgb
+	ld de,r_c64_pal
 	add hl,de
 	pop de
-	call k_get_iff
-	push af
 	di
-	ld a,b
-	add a,a
-	add a,a
-	ld b,a
-	call fs_write               ; palette bank 0
-	ld a,b
-	add a,64
-	ld b,a
-	call fs_write               ; palette bank 1 (see k_setlive)
-	pop af
-	or a
-	jp z,fs_di
+	out (VDP_CTRL),a
+	ld a,$90                    ; R#16: palette pointer
+	out (VDP_CTRL),a
+	ld a,(hl)
+	out (VDP_PAL),a
+	inc hl
+	ld a,(hl)
+	out (VDP_PAL),a
 	ei
-fs_di:
 	pop af
 	jr fs_done
 fs_full:
 	ld a,PAL_FIXED              ; out of slots: reuse the first one
 fs_done:
 	pop bc
-	pop hl
-	ret
-
-; palette pointer B, colour bytes at HL (HL preserved)
-fs_write:
-	ld a,14
-	out (V_SEL),a
-	ld a,b
-	out (V_REG),a
-	push hl
-	ld a,(hl)
-	out (V_PAL),a
-	inc hl
-	ld a,(hl)
-	out (V_PAL),a
-	inc hl
-	ld a,(hl)
-	out (V_PAL),a
 	pop hl
 	ret
 
@@ -1562,95 +1578,97 @@ cp_line:
 	ret
 
 ; ============================================================================
-; V9990 commands (cmdblk = R#32..R#52)
+; V9958 (cmdblk = R#32..R#46: +0 SX, +2 SY, +4 DX, +6 DY, +8 NX, +10 NY,
+; +12 CLR, +13 ARG, +14 CMD)
 ; ============================================================================
+; wait for the command engine (status register 2, CE)
 v_wait:
-	in a,(V_STAT)
-	rrca
-	jr c,v_wait
-	ret
-
-v_send_cmd:                     ; write R#32..R#52 atomically
-	call v_wait
-	call k_get_iff
-	push af
 	di
-	ld a,32
-	out (V_SEL),a
-	ld hl,cmdblk
-	ld bc,21*256+V_REG
-	otir
-	pop af
-	or a
-	ret z
+	ld a,2
+	ld (vdp_r15),a              ; the interrupts put it back after their reads
+	out (VDP_CTRL),a
+	ld a,$8F
+	out (VDP_CTRL),a
+	ei
+vwt_l:
+	in a,(VDP_CTRL)
+	rrca
+	jr c,vwt_l
+	di
+	xor a
+	ld (vdp_r15),a
+	out (VDP_CTRL),a
+	ld a,$8F
+	out (VDP_CTRL),a
 	ei
 	ret
 
-; LMMV fill: cmdblk+4 DX, +6 DY, +8 NX, +10 NY set; A = colour byte
-lmmv:
-	ld (cmdblk+16),a            ; FC
-	ld (cmdblk+17),a
-	xor a
-	ld (cmdblk+12),a            ; ARG
-	ld a,$0C
-	ld (cmdblk+13),a            ; LOP: WC = SC
-	ld a,$FF
-	ld (cmdblk+14),a
-	ld (cmdblk+15),a
-	ld a,$20                    ; LMMV
-	ld (cmdblk+20),a
-	jp v_send_cmd
+v_send_cmd:                     ; R#32..R#46 through the indirect port
+	call v_wait
+	di
+	ld a,32
+	out (VDP_CTRL),a
+	ld a,$91                    ; R#17 = 32, auto increment
+	out (VDP_CTRL),a
+	ei
+	ld hl,cmdblk
+	ld bc,15*256+VDP_IND
+	otir
+	ret
 
-; LMMC: DX, DY, NX, NY set
-lmmc_start:
-	xor a
+; HMMV fill: DX, DY, NX, NY set; A = colour byte
+hmmv:
 	ld (cmdblk+12),a
-	ld a,$0C
-	ld (cmdblk+13),a
-	ld a,$FF
-	ld (cmdblk+14),a
-	ld (cmdblk+15),a
-	ld a,$10                    ; LMMC
-	ld (cmdblk+20),a
-	jp v_send_cmd
+	ld a,$C0
+	jr cmd_arg0
 
-; LMMM copy: SX, SY, DX, DY, NX, NY set
-lmmm:
-	ld a,$0C
-lmmm_lop:
-	ld (cmdblk+13),a
-	xor a
-	ld (cmdblk+12),a
-	ld a,$FF
-	ld (cmdblk+14),a
-	ld (cmdblk+15),a
-	ld a,$40                    ; LMMM
-	ld (cmdblk+20),a
-	jp v_send_cmd
+; HMMM copy: SX, SY, DX, DY, NX, NY set (x even)
+hmmm:
+	ld a,$D0
+	jr cmd_arg0
+
+; LMMM copy skipping colour 0 (TIMP): SX, SY, DX, DY, NX, NY set
 lmmm_tp:
-	ld a,$1C                    ; transparent: skip colour 0
-	jr lmmm_lop
+	ld a,$98
+cmd_arg0:
+	ld (cmdblk+14),a
+	xor a
+	ld (cmdblk+13),a            ; ARG: left to right, top to bottom
+	jp v_send_cmd
+
+; set the VRAM write address: HL = y (0..511), A = x / 2.  Keeps BC, DE, HL.
+vram_wr:
+	push af
+	ld a,l
+	rlca
+	rlca
+	and 3
+	bit 0,h
+	jr z,vw_lo
+	or 4
+vw_lo:
+	di
+	out (VDP_CTRL),a            ; A16-A14 = y bits 8-6
+	ld a,$8E
+	out (VDP_CTRL),a
+	pop af
+	out (VDP_CTRL),a            ; A7-A0
+	ld a,l
+	and $3F
+	or $40                      ; A13-A8, write
+	out (VDP_CTRL),a
+	ei
+	ret
 
 ; ============================================================================
 ; sprites
 ; ============================================================================
+; sprites
+; ============================================================================
 sprites:
-	; back page = clean playfield (the V9990 copies while we go on)
-	ld hl,0
-	ld (cmdblk+0),hl
-	ld (cmdblk+4),hl
-	ld hl,CLEAN_Y
-	ld (cmdblk+2),hl
-	ld a,(page_back)
-	ld h,a
-	ld l,0
-	ld (cmdblk+6),hl
-	ld hl,512
-	ld (cmdblk+8),hl
-	ld hl,212
-	ld (cmdblk+10),hl
-	call lmmm
-sp_erased:
+	ld hl,sc_frame
+	inc (hl)
+	call sp_erase
 	xor a
 	ld (spr_n),a
 	ld (coll_acc),a
@@ -1688,9 +1706,46 @@ sp_done:
 	ld hl,coll_ss
 	or (hl)
 	ld (hl),a
-	; the back page is complete: shown from the next vblank
-	ld a,1
-	ld (flip_pending),a
+	ret
+
+; last frame's sprites: their rectangles back from the clean copy
+sp_erase:
+	ld a,(spr_n)
+	or a
+	ret z
+	ld b,a
+	ld ix,DRAWN
+spe_l:
+	push bc
+	ld l,(ix+0)
+	ld h,(ix+1)
+	ld a,l
+	and $FE
+	ld l,a                      ; x even
+	ld (cmdblk+0),hl
+	ld (cmdblk+4),hl
+	ld a,(ix+0)
+	and 1
+	add a,(ix+3)
+	inc a
+	and $FE                     ; even width that covers the sprite
+	ld l,a
+	ld h,0
+	ld (cmdblk+8),hl
+	ld l,(ix+2)
+	ld (cmdblk+6),hl
+	inc h
+	ld (cmdblk+2),hl            ; y + CLEAN_Y
+	ld l,(ix+5)
+	ld h,0
+	ld (cmdblk+10),hl
+	push ix
+	call hmmm
+	pop ix
+	ld de,8
+	add ix,de
+	pop bc
+	djnz spe_l
 	ret
 
 ; draw sprites 7..0 of record rgn_rec whose first line falls in [rgn_lo, rgn_hi)
@@ -1784,6 +1839,51 @@ spo_y:
 	; shape in the cache
 	call sp_cache               ; -> HL = cache x, A = slot, sets spr w/h in spr_tmp+6/7
 	ret c
+	; only the bounding box of the set pixels is copied
+	push hl
+	ld a,(spr_tmp+15)
+	ld l,a
+	ld h,0
+	add hl,hl
+	add hl,hl
+	add hl,hl
+	add hl,hl
+	ld de,SCACHE+7
+	add hl,de
+	ld a,(hl)                   ; x0
+	inc hl
+	ld b,(hl)                   ; x1
+	inc hl
+	ld c,a
+	sub b
+	jr z,spo_none               ; nothing set
+	neg
+	ld (spr_tmp+6),a            ; width
+	ld a,(hl)                   ; y0
+	inc hl
+	ld b,(hl)                   ; y1
+	ld e,a
+	neg
+	add a,b
+	ld (spr_tmp+7),a            ; height
+	ld d,0
+	ld hl,(spr_tmp+8)
+	add hl,de
+	ld (spr_tmp+8),hl           ; cache y
+	ld hl,(spr_tmp+4)
+	add hl,de
+	ld (spr_tmp+4),hl           ; screen y
+	ld e,c
+	ld hl,(spr_tmp+2)
+	add hl,de
+	ld (spr_tmp+2),hl           ; screen x
+	pop hl
+	add hl,de                   ; cache x
+	jr spo_trim
+spo_none:
+	pop hl
+	ret
+spo_trim:
 	; DRAWN entry
 	push hl
 	ld a,(spr_n)
@@ -1884,9 +1984,6 @@ spo_ypos:
 	ld c,a
 spo_hok:
 	ld (ix+5),c
-	ld a,(page_back)
-	add a,h
-	ld h,a                      ; y in the back page
 	ld (cmdblk+6),hl
 	ld l,c
 	ld h,0
@@ -2070,60 +2167,77 @@ spc_w:
 	ld a,42
 spc_h:
 	ld (spr_tmp+7),a
-	; slot = (pointer + 7*colour + 31*flags) & 63
-	ld a,(spr_tmp+12)
-	ld b,a
-	add a,a
-	add a,a
-	add a,a
-	sub b
-	ld b,a
-	ld a,(spr_tmp+11)
-	ld c,a
-	add a,a
-	add a,a
-	add a,a
-	add a,a
-	add a,a
-	sub c
-	add a,b
-	ld b,a
-	ld a,(spr_tmp+10)
-	add a,b
-	and SC_SLOTS-1
-	ld (spr_tmp+15),a
-	; compare key
-	ld l,a
-	ld h,0
-	add hl,hl
-	add hl,hl
-	add hl,hl
-	ld de,SCACHE
-	add hl,de
+	; the key in any slot?
+	ld hl,SCACHE
+	ld c,0
+spc_find:
 	push hl
 	ld de,spr_tmp+10
 	ld b,5
 spc_cmp:
 	ld a,(de)
 	cp (hl)
-	jr nz,spc_miss
+	jr nz,spc_next
 	inc hl
 	inc de
 	djnz spc_cmp
 	ld a,(hl)                   ; valid flag
 	or a
-	jr z,spc_miss
+	jr nz,spc_hit
+spc_next:
 	pop hl
-	jr spc_pos
-spc_miss:
-	pop hl
+	ld de,16
+	add hl,de
+	inc c
+	ld a,c
+	cp SC_SLOTS
+	jr nz,spc_find
+	; no: the slot unused for longest gets it
+	call spc_victim
+	ld a,c
+	ld (spr_tmp+15),a
+	push hl
 	ex de,hl
 	ld hl,spr_tmp+10
 	ld bc,5
 	ldir
 	ld a,1
 	ld (de),a
+	pop hl
+	push hl
+	call sp_bbox
 	call sp_render
+	pop hl
+	jr spc_stamp
+spc_hit:
+	pop hl
+	ld a,c
+	ld (spr_tmp+15),a
+	; the game rewrites sprite shapes in place: redraw the slot when the
+	; shape's 64 bytes changed (once per frame)
+	push hl
+	ld a,(spr_tmp+10)
+	ld e,a
+	ld d,VDW/256
+	ld a,(de)
+	or a
+	jr z,spc_fresh
+	ld de,6
+	add hl,de
+	ld a,(sc_frame)
+	cp (hl)
+	jr z,spc_fresh
+	pop hl
+	push hl
+	call sp_bbox
+	call sp_render
+spc_fresh:
+	pop hl
+spc_stamp:
+	ld de,6
+	add hl,de
+	ld a,(sc_frame)
+	ld (hl),a                   ; last use
 spc_pos:
 	; slot position: column = slot % 7, row = slot / 7
 	ld a,(spr_tmp+15)
@@ -2147,32 +2261,178 @@ spc_dd:
 	add hl,hl
 	add hl,hl
 	add hl,de                   ; *72
+	ld de,SC_Y0
+	ld a,c
+	or a
+	jr z,spc_y
+	ld de,SC_Y1
+spc_y:
+	ld (spr_tmp+8),de
+	or a
+	ret
+
+; least recently used slot (an empty one first) -> C = slot, HL = entry
+spc_victim:
+	ld hl,SCACHE
+	ld bc,SC_SLOTS*256          ; B = count, C = slot
+	ld de,0                     ; D = best age, E = best slot
+spv_l:
 	push hl
-	; y = SPRITE_CACHE_Y + row*42
+	ld a,l
+	add a,5
+	ld l,a
+	ld a,(hl)                   ; valid
+	or a
+	jr z,spv_free
+	inc hl
+	ld a,(sc_frame)
+	sub (hl)                    ; age
+	cp d
+	jr c,spv_n
+	ld d,a
+	ld e,c
+spv_n:
+	pop hl
+	ld a,l
+	add a,16
+	ld l,a
+	jr nc,spv_c
+	inc h
+spv_c:
+	inc c
+	djnz spv_l
+	ld c,e
+	jr spv_ptr
+spv_free:
+	pop hl
+spv_ptr:
 	ld l,c
 	ld h,0
-	ld d,h
-	ld e,l
 	add hl,hl
 	add hl,hl
 	add hl,hl
 	add hl,hl
-	add hl,hl                   ; *32
+	ld de,SCACHE
 	add hl,de
-	add hl,de
-	add hl,de
-	add hl,de
-	add hl,de
-	add hl,de
-	add hl,de
-	add hl,de
-	add hl,de
-	add hl,de                   ; *42
-	ld de,SPRITE_CACHE_Y
-	add hl,de
-	ld (spr_tmp+8),hl
-	pop hl
+	ret
+
+; bounding box of the sprite's set pixels, in 3-byte columns and rows (slot
+; entry HL +7 x0, +8 x1, +9 y0, +10 y1, in pixels of the cached shape)
+sp_bbox:
+	push bc
+	push hl
+	ld a,(spr_tmp+10)
+	ld l,a
+	ld h,0
+	add hl,hl
+	add hl,hl
+	add hl,hl
+	add hl,hl
+	add hl,hl
+	add hl,hl
+	ld de,$8000
+	add hl,de                   ; sprite data (VIC bank in page 2)
+	ld bc,21*256+0              ; B rows, C column bits
+	ld de,$FF00                 ; D first row, E last row + 1
+spb_row:
+	ld a,(hl)
 	or a
+	jr z,spb_1
+	set 0,c
+spb_1:
+	inc hl
+	ld a,(hl)
+	or a
+	jr z,spb_2
+	set 1,c
+spb_2:
+	inc hl
+	ld a,(hl)
+	or a
+	jr z,spb_3
+	set 2,c
+spb_3:
+	dec hl
+	or (hl)
+	dec hl
+	or (hl)                     ; the row's three bytes
+	inc hl
+	inc hl
+	inc hl
+	jr z,spb_next
+	ld a,21
+	sub b                       ; row index
+	inc d
+	jr nz,spb_hd
+	ld d,a                      ; first set row
+	jr spb_e
+spb_hd:
+	dec d
+spb_e:
+	inc a
+	ld e,a                      ; last set row + 1
+spb_next:
+	djnz spb_row
+	pop hl
+	push hl
+	ld a,l
+	add a,7
+	ld l,a
+	; columns: lowest and highest set bit of C, 12 pixels each (24 x-expanded)
+	ld b,12
+	ld a,(spr_tmp+11)
+	bit 1,a
+	jr z,spb_w
+	ld b,24
+spb_w:
+	xor a
+	ld (hl),a                   ; x0
+	inc hl
+	ld (hl),a                   ; x1 (empty)
+	ld a,c
+	or a
+	jr z,spb_y
+	dec hl
+	xor a
+	bit 0,c
+	jr nz,spb_x0
+	add a,b
+	bit 1,c
+	jr nz,spb_x0
+	add a,b
+spb_x0:
+	ld (hl),a
+	inc hl
+	ld a,b
+	add a,a
+	add a,b                     ; 3 columns
+	bit 2,c
+	jr nz,spb_x1
+	sub b
+	bit 1,c
+	jr nz,spb_x1
+	sub b
+spb_x1:
+	ld (hl),a
+spb_y:
+	inc hl
+	ld a,(spr_tmp+11)
+	bit 2,a                     ; y-expanded: rows count twice
+	ld a,d
+	jr z,spb_y0
+	add a,a
+spb_y0:
+	ld (hl),a                   ; y0
+	inc hl
+	ld a,(spr_tmp+11)
+	bit 2,a
+	ld a,e
+	jr z,spb_y1
+	add a,a
+spb_y1:
+	ld (hl),a                   ; y1
+	pop hl
+	pop bc
 	ret
 
 ; render the sprite shape for key spr_tmp+10.. into its cache slot
@@ -2203,19 +2463,15 @@ spr_hi:
 	ld (cell_cols+2),a
 spr_cols:
 	call nt_build
-	; LMMC into the slot
+	; into the slot, line by line (a copy from it may still be running)
+	call v_wait
 	call spc_pos
-	ld (cmdblk+4),hl
+	srl h
+	rr l
+	ld a,l
+	ld (spr_tmp+18),a           ; x byte
 	ld hl,(spr_tmp+8)
-	ld (cmdblk+6),hl
-	ld a,(spr_tmp+6)
-	ld l,a
-	ld h,0
-	ld (cmdblk+8),hl
-	ld a,(spr_tmp+7)
-	ld l,a
-	ld (cmdblk+10),hl
-	call lmmc_start
+	ld (spr_tmp+16),hl          ; line
 	; source: VIC bank + pointer*64 (Z80 $8000 based)
 	ld a,(spr_tmp+10)
 	ld l,a
@@ -2262,11 +2518,16 @@ spr_byte:
 	pop iy
 	ret
 spr_send:
+	ld hl,(spr_tmp+16)
+	ld a,(spr_tmp+18)
+	call vram_wr
+	inc hl
+	ld (spr_tmp+16),hl
 	ld hl,BUF
 	ld a,(spr_tmp+6)
 	srl a
 	ld b,a
-	ld c,V_CMD
+	ld c,VDP_DATA
 	otir
 	ret
 ; nibble A (low 4 bits) -> 3 bytes at IX (6 bytes if x-expanded)
@@ -2333,12 +2594,13 @@ row_sigs:
 ; light green -> green
 col_fold:
 	db 0, 1, 2, 3, 4, 5, 6, 7, 8, 8, 2, 12, 12, 5, 14, 15
-; C64 colours (Pepto) as V9990 5-bit R,G,B (copy: page 2 holds the VIC bank here)
-r_c64_rgb:
-	db  0, 0, 0,  31,31,31,  21, 7,11,  15,30,26
-	db 21, 8,30,  12,26, 6,   5, 7,29,  31,31, 8
-	db 24,13, 3,  15,10, 0,  30,16,16,  12,12,12
-	db 18,18,18,  20,31,16,  14,16,31,  25,25,25
+; C64 colours as V9958 palette bytes (copy of c64_pal: page 2 holds the VIC
+; bank here)
+r_c64_pal:
+	db $00,$00, $77,$07, $52,$02, $36,$07
+	db $57,$02, $31,$06, $17,$02, $72,$07
+	db $51,$03, $30,$02, $74,$04, $33,$03
+	db $44,$04, $54,$07, $37,$04, $66,$06
 
 region_render_end:
 	defs NT-region_render_end,0
