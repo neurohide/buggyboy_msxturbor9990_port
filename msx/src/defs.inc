@@ -97,7 +97,7 @@ ps_ready:        equ KVARS+$D4       ; ps_build is complete
 chain_key:       equ KVARS+$D5       ; 2: line order key of the last IRQ run this frame
 main_idle:       equ KVARS+$D7       ; main code polled the raster (it waits for a frame)
 vbl_wait:        equ KVARS+$D8       ; vblanks since the last frame while it was busy
-CHAIN_WAIT:      equ 4               ; ... after which the next frame runs anyway
+CHAIN_WAIT:      equ 2               ; ... after which the next frame runs anyway
 sid_pcache:      equ KVARS+$D9       ; 12: per voice last SID frequency, its PSG period
 
 ; timeline: two buffers of TL_MAX records of 64 bytes (in two separate holes)

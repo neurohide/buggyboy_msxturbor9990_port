@@ -1,6 +1,7 @@
 ; VIC-II -> V9958 renderer.  Lives in its own mapper segment (SEG_RENDER),
 ; mapped into page 1 and called from the vblank interrupt with interrupts
-; enabled (the next vblanks may nest: they run the C64 IRQs of later frames).
+; enabled, after the C64 IRQs of the frame it draws (vblanks that come while
+; it runs only do sound, input and the palette).
 ;
 ; GRAPHIC 6 (SCREEN 7), 512x212, 4 bpp.  One C64 multicolour pixel becomes
 ; three V9958 pixels (one hires pixel 1.5), so the 320 pixel C64 screen is

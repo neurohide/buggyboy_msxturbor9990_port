@@ -1,6 +1,6 @@
 ASCII16_P2:	equ $7000
 BUF:	equ $7100
-CHAIN_WAIT:	equ $0004
+CHAIN_WAIT:	equ $0002
 CHDIRTY:	equ $7a00
 CHGCPU:	equ $0180
 CHPUT:	equ $00a2
