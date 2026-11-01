@@ -1,7 +1,7 @@
 #!/bin/sh
-# usage: test/mkdrive.sh <outdir>  -> writes <outdir>/drive.tcl (fire tapped from 20s
-# through the menus, up+fire held from 110s, screenshots, and the rate of the C64
-# frame IRQ $11C5 between 120s and 135s; the MSX2+ runs the game in slow motion)
+# usage: test/mkdrive.sh <outdir>  -> writes <outdir>/drive.tcl (SPACE at 7s to leave the intro,
+# hold up+fire from 23s, screenshots, and the rate of the C64 frame IRQ $11C5
+# between 27s and 31s)
 S=$1
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 set -- $(python3 - <<PY
@@ -17,16 +17,14 @@ PY
 SEG=$1; ADDR=$2
 cat > $S/drive.tcl <<TCL
 proc shot {t name} { after time \$t "screenshot \$name" }
-for {set t 20} {\$t < 106} {incr t 2} {
-  after time \$t { keymatrixdown 8 0x01 }
-  after time [expr {\$t + 1}] { keymatrixup 8 0x01 }
-}
-after time 110 { keymatrixdown 8 0x21 }
-shot 115 $S/d1.png
-shot 125 $S/d2.png
-shot 135 $S/d3.png
+after time 7 { keymatrixdown 8 0x01 }
+after time 7.3 { keymatrixup 8 0x01 }
+after time 23 { keymatrixdown 8 0x21 }
+shot 26 $S/d1.png
+shot 29 $S/d2.png
+shot 32 $S/d3.png
 set ::n11 0
 debug set_bp $ADDR {[debug read memory 0x2F60] == $SEG} { incr ::n11 }
-after time 120 { set ::n11 0 }
-after time 135 { set f [open $S/rate.txt w]; puts \$f "11C5 per second: [expr {\$::n11/15.0}]"; close \$f }
+after time 27 { set ::n11 0 }
+after time 31 { set f [open $S/rate.txt w]; puts \$f "11C5 per second: [expr {\$::n11/4.0}]"; close \$f }
 TCL

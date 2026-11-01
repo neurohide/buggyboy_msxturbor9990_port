@@ -9,6 +9,7 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 BUILD = os.path.join(ROOT, 'build')
+INTRO = os.path.join(os.path.dirname(ROOT), 'intro')
 sys.path.insert(0, HERE)
 from c64image import load_image  # noqa: E402
 
@@ -19,6 +20,7 @@ KERNEL_REGIONS = {
     'k2': (0x8000, 0x8D00),
 }
 ROM_BANKS = 16      # 256K ASCII16
+INTRO_BANK = 15     # must match src/loader.asm
 
 
 def labels(path):
@@ -124,6 +126,12 @@ def main():
         banks.append(chunks['seg%d' % i][1])
     for b in banks:
         assert len(b) == 0x4000, len(b)
+    if len(banks) > INTRO_BANK:
+        sys.exit('ROM banks run into the intro bank')
+    subprocess.check_call(['make', '-s', 'intro.rom'], cwd=INTRO)
+    intro = open(os.path.join(INTRO, 'intro.rom'), 'rb').read()
+    assert len(intro) == 0x4000 and intro[0x10] == 0xC3, 'intro.rom has no timed entry'
+    banks += [b'\xFF' * 0x4000] * (INTRO_BANK - len(banks)) + [intro]
     rom = b''.join(banks)
     rom += b'\xFF' * (ROM_BANKS * 0x4000 - len(rom))
     out = os.path.join(BUILD, 'buggyboy.rom')

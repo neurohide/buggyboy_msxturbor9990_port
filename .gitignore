@@ -1,0 +1,7 @@
+.DS_Store
+__pycache__/
+
+# build output (msx/build/buggyboy.rom and intro/intro.rom are kept as ready-to-run ROMs)
+msx/build/*
+!msx/build/buggyboy.rom
+intro/data.inc
