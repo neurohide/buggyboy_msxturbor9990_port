@@ -1,4 +1,4 @@
-OPENMSX ?= /Applications/openMSX.app/Contents/MacOS/openmsx
+OPENMSX ?= openmsx
 MACHINE ?= Panasonic_FS-A1F
 
 intro.rom: intro.asm data.inc

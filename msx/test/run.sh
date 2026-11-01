@@ -1,8 +1,9 @@
 #!/bin/sh
 # usage: test/run.sh <seconds> <outprefix> [extra tcl]
 # Boots the ROM on a Panasonic FS-A1GT with a GFX9000 and dumps state.
+# openMSX is taken from PATH, or from $OPENMSX.
 SECS=${1:-10}
-OUT=${2:-/tmp/bb}
+OUT=${2:-${TMPDIR:-/tmp}/bb}
 EXTRA=${3:-}
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 cat > "$OUT.tcl" <<TCL
@@ -33,7 +34,7 @@ proc sample {} {
 after time ${SAMPLE_FROM:-0} sample
 after time $SECS { dumpstate; screenshot $OUT.png; close \$::samp; exit }
 TCL
-/Applications/openMSX.app/Contents/MacOS/openmsx -machine Panasonic_FS-A1GT -ext gfx9000 \
+"${OPENMSX:-openmsx}" -machine Panasonic_FS-A1GT -ext gfx9000 \
   -cart "$HERE/build/buggyboy.rom" -romtype ASCII16 -script "$OUT.tcl" > "$OUT.log" 2>&1
 cat "$OUT.txt"
 python3 "$HERE/tools/symmap.py" "$OUT.samples" | head -${TOP:-25}

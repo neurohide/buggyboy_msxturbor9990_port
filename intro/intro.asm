@@ -6,6 +6,15 @@
 ; rides a sine path in the sky, drawn with VDP HMMM block copies, while the
 ; PSG plays a looping pentatonic theme with koto-like plucks.
 ; Build: make (python3 gen_data.py && z80asm intro.asm -o intro.rom)
+;
+; The font has more characters than the 16 glyph slots in VRAM, so each
+; glyph is drawn into slot (message position & 15) just before it scrolls in.
+;
+; Run from the cartridge header the intro loops forever. Another ROM can
+; also map this one into page 1 and CALL 0x4010: the intro then plays until
+; a key or a joystick 1 button is pressed and released, switches the VDP
+; interrupts and the PSG off, restores IM 1 and the caller's stack, and
+; returns with DI.
 
 VDP_DATA:       equ     0x98
 VDP_CTRL:       equ     0x99
@@ -13,6 +22,9 @@ VDP_PAL:        equ     0x9A
 VDP_IND:        equ     0x9B
 PSG_ADDR:       equ     0xA0
 PSG_DATA:       equ     0xA1
+PSG_RD:         equ     0xA2
+PPI_B:          equ     0xA9            ; keyboard row bits
+PPI_C:          equ     0xAA            ; low nibble selects the keyboard row
 
 ; RAM
 frame:          equ     0xC001
@@ -43,6 +55,13 @@ cl_x:           equ     0xC078
 last_cloud:     equ     0xC07A
 cl_lo:          equ     0xC07B          ; strip span start (even)
 cl_nx:          equ     0xC07C          ; strip span width (word)
+intro_mode:     equ     0xC080          ; 0 = run forever, 1 = until a key
+intro_done:     equ     0xC081          ; set by the vblank after the key
+key_state:      equ     0xC082          ; 0 wait all up, 1 wait down, 2 wait up
+saved_sp:       equ     0xC083          ; caller's stack for the key entry
+up_pos:         equ     0xC085          ; message position of the glyph being drawn
+up_row:         equ     0xC086          ; its next pixel row
+rowbuf:         equ     0xC090          ; one 32-pixel glyph row, 16 bytes
 im2_table:      equ     0xE000          ; 257 x 0xE1 -> vector 0xE1E1
 im2_vector:     equ     0xE1E1
 
@@ -50,10 +69,24 @@ im2_vector:     equ     0xE1E1
         db      "AB"
         dw      start
         dw      0, 0, 0, 0, 0, 0
+        jp      start_key               ; 0x4010
 
 start:
         di
+        xor     a
+        jr      init
+
+start_key:
+        di
+        ld      (saved_sp), sp
+        ld      a, 1
+
+init:
         ld      sp, 0xDFF0
+        ld      (intro_mode), a
+        xor     a
+        ld      (intro_done), a
+        ld      (key_state), a
 
         ; IM2 with a full vector table, so any bus value lands on our handler.
         ld      hl, im2_table
@@ -92,11 +125,7 @@ start:
         ld      ix, band3_desc
         call    init_band
 
-        ld      a, GLYPH_PAGE
-        ld      d, GLYPH_ROW
-        call    vram_wr
-        ld      hl, glyphs_rle
-        call    out_rle
+        call    init_glyphs
         call    init_clouds
 
         ; Constant part of the glyph HMMM command.
@@ -127,6 +156,9 @@ start:
 ; The big scroller has priority and is redrawn every second frame (30 fps);
 ; the clouds are rebuilt every fourth frame with the time that is left.
 main_loop:
+        ld      a, (intro_done)
+        or      a
+        jp      nz, intro_exit
         ld      a, (frame)
         ld      b, a
         ld      a, (last_frame)
@@ -145,10 +177,13 @@ ml_clouds:
         ld      a, b
         sub     c
         cp      4
-        jr      c, main_loop
+        jr      c, ml_glyph
         ld      a, b
         ld      (last_cloud), a
         call    draw_clouds
+        jr      main_loop
+ml_glyph:
+        call    glyph_step
         jr      main_loop
 
 ; ------------------------------------------------------------------ interrupts
@@ -191,6 +226,7 @@ isr_vblank:
         push    ix
         ld      hl, frame
         inc     (hl)
+        call    key_check
         call    build_bands
         call    animate_palette
         call    music
@@ -201,6 +237,90 @@ isr_vblank:
         pop     af
         ei
         reti
+
+; In key mode: done once something is pressed and released again, after
+; everything was up at least once (a key held from boot does not count).
+key_check:
+        ld      a, (intro_mode)
+        or      a
+        ret     z
+        call    any_input
+        ld      hl, key_state
+        jr      nz, kc_down
+        ld      a, (hl)
+        cp      2
+        jr      z, kc_done
+        ld      (hl), 1
+        ret
+kc_down:
+        ld      a, (hl)
+        or      a
+        ret     z
+        ld      (hl), 2
+        ret
+kc_done:
+        ld      a, 1
+        ld      (intro_done), a
+        ret
+
+; NZ if any key (rows 0-10) or joystick 1 button A/B is down.
+any_input:
+        ld      b, 0
+ai_row:
+        in      a, (PPI_C)
+        and     0xF0
+        or      b
+        out     (PPI_C), a
+        in      a, (PPI_B)
+        inc     a                       ; 0xFF: nothing in this row
+        ret     nz
+        inc     b
+        ld      a, b
+        cp      11
+        jr      c, ai_row
+        ld      a, 15
+        out     (PSG_ADDR), a
+        in      a, (PSG_RD)
+        and     0xBF                    ; joystick port 1
+        out     (PSG_DATA), a
+        ld      a, 14
+        out     (PSG_ADDR), a
+        in      a, (PSG_RD)
+        cpl
+        and     0x30
+        ret
+
+; End of the key run: leave the VDP and PSG quiet and give the machine back.
+intro_exit:
+        di
+        call    wait_ce
+        ld      hl, exit_regs
+        ld      bc, VDP_CTRL + 256 * (exit_regs_end - exit_regs)
+        otir
+        in      a, (VDP_CTRL)           ; S#0, drops a pending vblank
+        ld      hl, exit_psg
+        ld      b, (exit_psg_end - exit_psg) / 2
+ie_psg:
+        ld      a, (hl)
+        out     (PSG_ADDR), a
+        inc     hl
+        ld      a, (hl)
+        out     (PSG_DATA), a
+        inc     hl
+        djnz    ie_psg
+        im      1
+        ld      sp, (saved_sp)
+        ret
+
+exit_regs:
+        db      0x06, 0x80              ; line interrupts off
+        db      0x00, 0x81              ; display and vblank interrupt off
+        db      0x00, 0x8F              ; status register 0, as the BIOS expects
+exit_regs_end:
+exit_psg:
+        db      8, 0, 9, 0, 10, 0       ; volumes off
+        db      7, 0xBF                 ; tone and noise off, port B output
+exit_psg_end:
 
 ; Read S#1 to acknowledge a line interrupt, then select S#2 again.
 clear_fh:
@@ -405,10 +525,7 @@ dt_char:
         ld      (cmdbuf + 6), a         ; DY
 
         ld      a, (text_idx)
-        ld      e, a
-        ld      hl, message
-        add     hl, de
-        ld      a, (hl)
+        and     15                      ; glyph slot
         add     a, a
         ld      e, a
         ld      hl, glyph_src
@@ -470,6 +587,190 @@ text_cmd:
         db      0, 0, 0, 0
         db      CELL, 0, BLOCK_H, 0
         db      0, 0, 0xD0              ; HMMM
+
+; ------------------------------------------------------------------ glyphs
+; Clear the slots to the text background and draw positions 0-15.
+init_glyphs:
+        ld      hl, glyph_clear
+        call    vdp_cmd
+        call    wait_ce
+        xor     a
+        ld      (up_pos), a
+        ld      (up_row), a
+ig_loop:
+        call    glyph_row
+        ld      a, (up_pos)
+        cp      16
+        jr      c, ig_loop
+        ret
+
+glyph_clear:
+        db      0, 0, 0, 0
+        db      0, 0, GLYPH_ROW, GLYPH_PAGE
+        db      0, 1, 2 * BLOCK_H, 0
+        db      0x66, 0, 0xC0           ; HMMV with colour 6
+
+; Main loop filler: one row of the next glyph, once the glyph that used
+; its slot 16 positions earlier has left the screen.
+glyph_step:
+        ld      a, (up_row)
+        or      a
+        jr      nz, glyph_row
+        ld      hl, (scroll)
+        add     hl, hl
+        add     hl, hl
+        add     hl, hl                  ; H = first visible position
+        ld      a, (up_pos)
+        sub     h
+        jr      nc, gs_ahead
+        add     a, MSG_LEN
+gs_ahead:
+        cp      16
+        ret     nc
+; Draw row up_row of the glyph at up_pos into its slot, then step on.
+; Font pixels are 4x4; rows 0-9 colour 10, 10-19 colour 8, 20-31 colour 11,
+; and the two pixel rows under each font row are shadow (colour 1).
+glyph_row:
+        ld      a, (up_pos)
+        ld      e, a
+        ld      d, 0
+        ld      hl, message
+        add     hl, de
+        ld      l, (hl)
+        ld      h, d
+        add     hl, hl
+        add     hl, hl
+        add     hl, hl
+        ld      de, font
+        add     hl, de
+        ld      a, (up_row)
+        ld      b, a
+        rrca
+        rrca
+        and     0x3F                    ; font row
+        ld      e, a
+        ld      d, 0
+        add     hl, de
+        cp      8
+        jr      nc, gr_nocur            ; below the glyph: shadow only
+        ld      d, (hl)
+gr_nocur:
+        ld      e, 0
+        ld      a, b
+        and     2
+        jr      nz, gr_noabove
+        ld      a, b
+        cp      4
+        jr      c, gr_noabove
+        dec     hl
+        ld      e, (hl)
+gr_noabove:
+        ld      a, d
+        cpl
+        and     e
+        ld      e, a                    ; D = glyph bits, E = shadow bits
+        ld      a, b
+        ld      c, 0xAA
+        cp      10
+        jr      c, gr_colour
+        ld      c, 0x88
+        cp      20
+        jr      c, gr_colour
+        ld      c, 0xBB
+gr_colour:
+        ld      hl, rowbuf
+        ld      b, 8
+gr_px:
+        sla     d
+        jr      c, gr_glyph
+        ld      a, 0x66
+        sla     e
+        jr      nc, gr_put
+        ld      a, 0x11
+        jr      gr_put
+gr_glyph:
+        sla     e
+        ld      a, c
+gr_put:
+        ld      (hl), a
+        inc     hl
+        ld      (hl), a
+        inc     hl
+        djnz    gr_px
+        ; VRAM: page 1, row = GLYPH_ROW + slot / 8 * BLOCK_H + TEXT_TOP + up_row
+        ld      a, (up_pos)
+        and     15
+        ld      c, a
+        ld      b, 0
+        cp      8
+        jr      c, gr_top
+        ld      b, BLOCK_H
+gr_top:
+        ld      a, (up_row)
+        add     a, GLYPH_ROW + TEXT_TOP
+        add     a, b
+        ld      h, a
+        ld      l, 0
+        srl     h
+        rr      l
+        set     7, h                    ; + page 1
+        ld      a, c
+        and     7
+        add     a, a
+        add     a, a
+        add     a, a
+        add     a, a
+        or      l
+        ld      l, a                    ; + slot x / 2
+        ; DI over the whole row, so the ISR cannot get between the address
+        ; and the data
+        ld      a, h
+        rlca
+        rlca
+        and     3
+        di
+        out     (VDP_CTRL), a
+        ld      a, 0x8E
+        out     (VDP_CTRL), a
+        ld      a, l
+        out     (VDP_CTRL), a
+        ld      a, h
+        and     0x3F
+        or      0x40
+        out     (VDP_CTRL), a
+        ld      hl, rowbuf
+        ld      c, VDP_DATA
+        outi
+        outi
+        outi
+        outi
+        outi
+        outi
+        outi
+        outi
+        outi
+        outi
+        outi
+        outi
+        outi
+        outi
+        outi
+        outi
+        ei
+        ld      hl, up_row
+        inc     (hl)
+        ld      a, (hl)
+        cp      GLYPH_LINES
+        ret     c
+        ld      (hl), 0
+        ld      a, (up_pos)
+        inc     a
+        cp      MSG_LEN
+        jr      c, gr_pos
+        xor     a
+gr_pos:
+        ld      (up_pos), a
+        ret
 
 ; ------------------------------------------------------------------ clouds
 ; Each cloud is rebuilt off screen: copy its clean sky strip into a buffer,
