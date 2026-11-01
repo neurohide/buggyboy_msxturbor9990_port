@@ -29,12 +29,6 @@ by the owners of *Buggy Boy*.
     <td><img src="docs/screenshots/msx-select.png" width="400" alt="MSX course select"></td>
     <td><img src="docs/screenshots/msx-race.png" width="400" alt="MSX race"></td>
   </tr>
-  <tr>
-    <th colspan="2">MSX2 intro, shown before the game</th>
-  </tr>
-  <tr>
-    <td colspan="2" align="center"><img src="docs/screenshots/msx-intro.png" width="400" alt="MSX2 intro"></td>
-  </tr>
 </table>
 
 ## Repository layout
