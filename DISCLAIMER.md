@@ -1,5 +1,15 @@
 # Disclaimer
 
+This is an **unofficial fan port** of the Commodore 64 version of
+*Buggy Boy*, made to celebrate the original game and to study it
+technically. All credit for the game goes to its original authors:
+
+- **Dave Thomas**, programming (C64 version)
+- **Bob Thomas**, graphics (C64 version)
+- **Elite Systems Ltd**, publisher of the C64 version (1987)
+- **Tatsumi**, developer of the original arcade game, and **Taito
+  Corporation** (© 1987, as credited on the title screen)
+
 This repository is a **non-commercial, educational project**. Its purpose
 is to study and document the techniques involved in moving software
 between 8-bit platforms:
