@@ -17,7 +17,7 @@ between 8-bit platforms:
 - reverse engineering a packed Commodore 64 program,
 - static binary translation from 6502 to Z80/R800 machine code,
 - replacing C64 hardware (VIC-II, SID, CIA, raster interrupts) with
-  MSX hardware (V9990, PSG, the turbo R system timer).
+  MSX hardware (V9958 SCREEN 7, PSG and VDP interrupts on the turbo R).
 
 The game is only the test case for this work.
 

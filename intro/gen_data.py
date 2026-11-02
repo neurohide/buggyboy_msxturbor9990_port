@@ -2,7 +2,7 @@
 """Generate data.inc for intro.asm: palette, sky RLE, wave tiles, glyphs, tables."""
 import math
 
-MESSAGE = "MSX port by neurohide" + " " * 8 + "PLEASE SWITCH to V9990 and press a key" + " " * 8
+MESSAGE = "MSX port by neurohide" + " " * 8 + "press a key to start" + " " * 8
 MESSAGE += " " * (-len(MESSAGE) % 16)  # glyph slot = position & 15, so wrap cleanly
 
 # Theme, looped. One bass pluck per group of four melody notes.

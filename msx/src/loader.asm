@@ -32,7 +32,7 @@ ld_init:
 	ld bc,ld_istub_end-ld_istub
 	ldir
 	call INTRO_STUB
-	; R800 ROM mode (keeps all mapper RAM for us)
+	; R800 ROM mode (keeps all 16 mapper segments available to the renderer)
 	ld a,$81
 	call CHGCPU
 	; slot of this cartridge (page 1)

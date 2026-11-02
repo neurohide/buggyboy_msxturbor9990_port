@@ -1,7 +1,8 @@
 #!/bin/sh
 # usage: test/run.sh <seconds> <outprefix> [extra tcl]
-# Boots the ROM on a Panasonic FS-A1GT with a GFX9000 and dumps state.
+# Boots the SCREEN 7 ROM on a Panasonic FS-A1GT and dumps state.
 # openMSX is taken from PATH, or from $OPENMSX.
+set -eu
 SECS=${1:-10}
 OUT=${2:-${TMPDIR:-/tmp}/bb}
 EXTRA=${3:-}
@@ -9,12 +10,15 @@ HERE=$(cd "$(dirname "$0")/.." && pwd)
 cat > "$OUT.tcl" <<TCL
 set throttle off
 set renderer SDLGL-PP
-after time 1 { catch { set videosource GFX9000 } }
 $EXTRA
 proc dumpstate {} {
   set f [open "$OUT.txt" w]
   puts \$f "pc=[format %04X [reg pc]] sp=[format %04X [reg sp]]"
-  foreach {name addr n} {kvars 0x2F60 0x60 vicregs 0x2F00 0x30} {
+  puts \$f "cpu=[get_active_cpu]"
+  set s ""
+  for {set i 0} {\$i < 32} {incr i} { append s [format "%02X " [debug read {VDP regs} \$i]] }
+  puts \$f "vdp: \$s"
+  foreach {name addr n} {kvars 0x2F60 0x90 vicregs 0x2F00 0x30} {
     set s ""
     for {set i 0} {\$i < \$n} {incr i} { append s [format "%02X " [debug read memory [expr {\$addr + \$i}]]] }
     puts \$f "\$name: \$s"
@@ -34,7 +38,14 @@ proc sample {} {
 after time ${SAMPLE_FROM:-0} sample
 after time $SECS { dumpstate; screenshot $OUT.png; close \$::samp; exit }
 TCL
-"${OPENMSX:-openmsx}" -machine Panasonic_FS-A1GT -ext gfx9000 \
-  -cart "$HERE/build/buggyboy.rom" -romtype ASCII16 -script "$OUT.tcl" > "$OUT.log" 2>&1
+if ! "${OPENMSX:-openmsx}" -machine Panasonic_FS-A1GT \
+  -cart "$HERE/build/buggyboy.rom" -romtype ASCII16 -script "$OUT.tcl" > "$OUT.log" 2>&1; then
+  cat "$OUT.log" >&2
+  exit 1
+fi
+if [ ! -f "$OUT.txt" ]; then
+  cat "$OUT.log" >&2
+  exit 1
+fi
 cat "$OUT.txt"
 python3 "$HERE/tools/symmap.py" "$OUT.samples" | head -${TOP:-25}
