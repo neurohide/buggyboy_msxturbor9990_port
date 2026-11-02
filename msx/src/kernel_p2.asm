@@ -321,6 +321,9 @@ int_vblank:
 	ld hl,rendering
 	or (hl)
 	jr nz,ivb_busy              ; we interrupted the frame or its drawing
+	ld a,(bench_pace)
+	or a
+	jr nz,ivb_bench
 	ld a,(main_idle)
 	or a
 	jr nz,ivb_run
@@ -333,6 +336,7 @@ ivb_run:
 	xor a
 	ld (main_idle),a
 	ld (vbl_wait),a
+	ld (main_pass),a
 	inc a
 	ld (in_vbl),a
 	ei
@@ -362,6 +366,11 @@ ivb_run:
 	ld (rendering),a
 	inc a
 	ld (flip_pending),a
+	jr ivb_x
+ivb_bench:                      ; benchmark: frames only after a full main pass,
+	ld a,(main_idle)            ; never on a timeout, so every build computes
+	or a                        ; the same frames
+	jr nz,ivb_run
 	jr ivb_x
 ivb_busy:
 	ld hl,vbl_missed
@@ -807,6 +816,25 @@ iord_d01f:
 	ld a,(hl)
 	ld (hl),0
 	ld l,a
+	pop af
+	ret
+
+; Called by the translated code at the top of a main loop that waits for the
+; IRQ code without polling the raster (MAIN_LOOP_TOPS in translate.py).  The
+; second visit after a frame ends a complete pass, so that frame's work is
+; done and the next frame may run.  Preserves all registers and flags.
+k_mainpass:
+	push af
+	ld a,(main_pass)
+	cp 2
+	jr nc,kmp_x
+	inc a
+	ld (main_pass),a
+	cp 2
+	jr c,kmp_x
+	ld a,1
+	ld (main_idle),a
+kmp_x:
 	pop af
 	ret
 

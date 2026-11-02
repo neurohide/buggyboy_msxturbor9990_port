@@ -51,6 +51,9 @@ DEFS['clc'] = DEFS['sec'] = C
 
 # JMPs by which an IRQ handler abandons the interrupt (game over at $1329)
 ESCAPE_JUMPS = {0x1329}
+# Top of a main loop that spins until the IRQ code sets flags (the race loop
+# at $2861 never polls the raster); k_mainpass marks the main code idle there
+MAIN_LOOP_TOPS = {0x2861}
 
 BRANCH_COND = {'beq': 'z', 'bne': 'nz', 'bmi': 'm', 'bpl': 'p'}
 SMC_OPERAND = set()           # instruction addresses whose operand is patched at runtime
@@ -390,6 +393,8 @@ class Gen:
             self.cs = 'P'
         text = mn + ('' if v is None else (' #$%02X' % v if mode == 'imm' else ' $%04X' % v))
         self.out.append('%s:\t\t\t; %04X %s %s' % (L(a), a, text, mode))
+        if a in MAIN_LOOP_TOPS:
+            self.emit('call k_mainpass')
         nz = lo & (N | Z)
 
         if mn == 'lda':

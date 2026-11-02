@@ -13,6 +13,8 @@ SEG_C3:          equ 7               ; C64 $C000-$FFFF
 SEG_CODE:        equ 8               ; first translated code segment
 SEG_RENDER:      equ 12              ; renderer code + tables (mapped in page 1)
 SEG_SHADOW:      equ 13              ; renderer: last drawn cell inputs (mapped in page 3)
+SEG_FRAME:       equ 0               ; four segments: sprite-free SCREEN 7 pixels
+SEG_SPRITES:     equ 14              ; two segments: 16 cached shapes, 2K each
 
 ; ---- V9958 -------------------------------------------------------------------
 VDP_DATA:        equ $98             ; VRAM data
@@ -29,11 +31,7 @@ VR1_OFF:         equ $20             ; R#1: display blanked, vblank interrupt on
 RASTER_OFS:      equ 45
 SCREEN_X:        equ 16              ; V9958 x of C64 pixel column 0
 SCREEN_Y:        equ 6               ; V9958 y of C64 raster line 51
-CLEAN_Y:         equ 256             ; y of the sprite-free playfield copy (page 1)
-; display at y 0 (page 0); sprite shape cache in the unseen lines 212-253 of
-; both pages (SC_Y0, SC_Y1)
-SC_Y0:           equ 212
-SC_Y1:           equ 256+212
+CLEAN_Y:         equ 256             ; logical clean-buffer origin used by row setup
 
 ; palette slots
 PAL_BG0:         equ 0               ; $D021 (live)
@@ -99,6 +97,8 @@ main_idle:       equ KVARS+$D7       ; main code polled the raster (it waits for
 vbl_wait:        equ KVARS+$D8       ; vblanks since the last frame while it was busy
 CHAIN_WAIT:      equ 2               ; ... after which the next frame runs anyway
 sid_pcache:      equ KVARS+$D9       ; 12: per voice last SID frequency, its PSG period
+main_pass:       equ KVARS+$E5       ; main loop tops reached since the last frame
+bench_pace:      equ KVARS+$E6       ; test scripts: frames strictly after main passes (0 = off)
 
 ; timeline: two buffers of TL_MAX records of 64 bytes (in two separate holes)
 TIMELINE:        equ $3100

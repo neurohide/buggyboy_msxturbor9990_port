@@ -186,6 +186,7 @@ k_vrd:
 ; write VIC bank: HL = $4000-$7FFF, A = value
 k_vwr:
 	push af
+vwr_body:                       ; entered from k_gwr with AF already pushed
 	ld a,SEG_VIC
 	ld (cur_p2),a
 	out (PORT_P2),a
@@ -279,13 +280,16 @@ k_grd_ram:
 	jr grd_direct
 
 ; generic write: HL = any C64 address, A = value
+; Nearly every generic write goes to the VIC bank, so test that range first.
 k_gwr:
 	push af
 	ld a,h
+	sub $40
+	cp $40
+	jp c,vwr_body
+	ld a,h
 	cp $40
 	jr c,gwr_direct
-	cp $80
-	jr c,gwr_vic
 	cp $D0
 	jr c,gwr_direct
 	cp $E0
@@ -302,9 +306,6 @@ gwr_direct:
 	pop af
 	ld (hl),a
 	ret
-gwr_vic:
-	pop af
-	jp k_vwr
 gwr_io:
 	pop af
 	jp k_iowr
@@ -312,10 +313,9 @@ gwr_io:
 k_gwr_ram:
 	push af
 	ld a,h
+	sub $40
 	cp $40
-	jr c,gwr_direct
-	cp $80
-	jr c,gwr_vic
+	jp c,vwr_body
 	jr gwr_direct
 
 ; C64 $FFFF (lives in a kernel variable; Z80 $FFFF is the sub-slot register)

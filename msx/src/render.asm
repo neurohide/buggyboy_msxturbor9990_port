@@ -7,12 +7,9 @@
 ; three V9958 pixels (one hires pixel 1.5), so the 320 pixel C64 screen is
 ; 480 pixels wide, which matches the C64's pixel aspect closely.
 ;
-;   y 0..211     display (page 0, the only one shown: no double buffering)
-;   y 212..253   sprite shape cache, 7 slots of 72x42
-;   y 256..467   clean playfield (no sprites): dirty cells are written here by
-;                the CPU and copied to the display by the VDP; sprites are
-;                erased from here
-;   y 468..509   sprite shape cache, 7 more slots
+; The clean bitmap and cached sprites live in mapper RAM. Damaged scanlines
+; are composed in RAM and uploaded once, avoiding pixel-wise VDP copies and
+; the visible erase/redraw gap between overlapping sprites.
 ;
 ; Everything that writes the VDP's port $99 twice runs with interrupts off:
 ; the line interrupt (palette) and the vblank use the same port.
@@ -28,9 +25,16 @@ NT:              equ $7000           ; nibble table: 16 x 3 bytes
 BUF:             equ $7100           ; cell pixels, line-major, up to 40 cells
 VDW:             equ $7900           ; work copy of VDIRTY
 CHDIRTY:         equ $7A00           ; per character code
-SCACHE:          equ $7B00           ; sprite cache: 14 slots x 16 bytes (see sp_cache)
+SCACHE:          equ $7B00           ; sprite cache: 16 slots x 16 bytes (see sp_cache)
+SPR_MASK:        equ $7C00           ; transparent-nibble masks, 256 bytes
 RV:              equ $7F00           ; misc variables (overlaps nothing below $7F00)
-SC_SLOTS:        equ 14              ; 2 rows of 7 in VRAM
+SC_SLOTS:        equ 16
+DAMAGE:          equ $6500           ; 212 x 16 bits, one per 16-byte span
+SP_SOURCE:       equ $6800           ; 16 x (source x, source y) for DRAWN
+OLD_DRAWN:       equ $6900           ; last frame's sprite list
+OLD_SOURCE:      equ $6980
+OLD_KEY:         equ $6A00           ; cache key for each previous sprite
+FG:              equ BUF+256        ; one cached sprite scanline
 
 cdw:             equ RV+$00          ; 16
 row_full:        equ RV+$10          ; 25
@@ -39,7 +43,7 @@ row_rec:         equ RV+$2A          ; 2
 row_mode:        equ RV+$2C          ; bit0 mc, bit1 bitmap, bit2 blank
 row_scr:         equ RV+$2D          ; 2: Z80 address of the row's screen bytes
 row_data:        equ RV+$2F          ; 2: Z80 address of char base / bitmap row
-row_xoff:        equ RV+$31          ; x shift in V9990 pixels
+row_xoff:        equ RV+$31          ; x shift in SCREEN 7 pixels
 row_csel:        equ RV+$32
 row_scroff:      equ RV+$33          ; 2: bank offset of screen row (for dirty lookup)
 row_bmoff:       equ RV+$35          ; 2: bank offset of bitmap row
@@ -57,7 +61,7 @@ celldirty:       equ RV+$59          ; 40
 tl_ptr:          equ RV+$81          ; 2: next event record
 tl_left:         equ RV+$83          ; events left
 rec_cur:         equ RV+$84          ; 2
-cmdblk:          equ RV+$86          ; 15: R#32..R#46
+cmdblk:          equ RV+$86          ; rectangle: SX, SY, DX, DY, NX, NY
 spr_n:           equ RV+$9B          ; sprites drawn this frame
 spr_tmp:         equ RV+$D0          ; 32 scratch
 rgn_rec:         equ RV+$A5          ; 2 record of the sprite region
@@ -66,6 +70,25 @@ rgn_hi:          equ RV+$A9          ; 2 first raster line after region
 coll_acc:        equ RV+$AB
 rgn_idx:         equ RV+$AC
 sc_frame:        equ RV+$AD          ; sprite cache clock (one tick per frame)
+blit_sx:         equ RV+$AE
+blit_dx:         equ RV+$AF
+blit_srcbytes:   equ RV+$B0
+blit_bytes:      equ RV+$B1
+blit_rows:       equ RV+$B2
+blit_phase:      equ RV+$B3          ; 0 aligned, 1 shift right, 2 shift left
+blit_first:      equ RV+$B4          ; destination starts on a low nibble
+blit_last:       equ RV+$B5          ; destination ends on a high nibble
+flush_y:         equ RV+$B6
+flush_x:         equ RV+$B7
+flush_bytes:     equ RV+$B8
+flush_sprite:    equ RV+$B9
+blit_dst:        equ RV+$BA          ; 2: scanline composition pointer
+old_spr_n:       equ RV+$BC
+flush_mask:      equ RV+$BD          ; 2: remaining spans on this scanline
+flush_chunk:     equ RV+$BF
+fbw_all:         equ RV+$C0          ; framebuffer_write marks every byte (first frame)
+fbw_last:        equ RV+$C1          ; last byte framebuffer_write changed
+flush_ptr:       equ RV+$C2          ; 2: DAMAGE word after the line being flushed
 dbg_cells:       equ RV+$F0          ; 2: cells drawn last frame
 dbg_full:        equ RV+$F2          ; rows fully redrawn last frame
 dbg_cnt:         equ RV+$F3          ; 2: running cell count
@@ -93,6 +116,13 @@ render:
 	ld a,SEG_SHADOW
 	ld (cur_p3),a
 	out (PORT_P3),a
+	ld hl,DAMAGE
+	ld de,DAMAGE+1
+	ld bc,423
+	ld (hl),0
+	ldir
+	xor a
+	ld (fbw_all),a
 	ld a,(first_done)
 	or a
 	call z,render_first
@@ -141,7 +171,9 @@ rr_loop:
 	cp 25
 	jr nz,rr_loop
 	call sprites
+	call sprite_changes
 	call screen_change
+	call flush_damage
 
 	ld a,SEG_C3
 	ld (cur_p3),a
@@ -151,16 +183,48 @@ rr_loop:
 render_first:
 	ld a,1
 	ld (first_done),a
+	ld (fbw_all),a
+	ld hl,SPR_MASK
+	ld b,0
+rf_mask:
+	ld a,l
+	and $F0
+	ld c,0
+	jr nz,rf_mask_lo
+	ld c,$F0
+rf_mask_lo:
+	ld a,l
+	and $0F
+	sub 1
+	sbc a,a
+	and $0F
+	or c
+	ld (hl),a
+	inc l
+	djnz rf_mask
 	ld hl,row_full
 	ld b,25
 rf1:
 	ld (hl),1
 	inc hl
 	djnz rf1
-	; border colour around the C64 screen on the display and the clean copy
+	ld a,SEG_FRAME
+rf_clear:
+	ld (cur_p2),a
+	out (PORT_P2),a
+	push af
+	ld hl,$8000
+	ld de,$8001
+	ld bc,$3FFF
+	ld (hl),0
+	ldir
+	pop af
+	inc a
+	cp SEG_FRAME+4
+	jr nz,rf_clear
+	call k_map_vic
+	; border colour around the C64 screen in the clean bitmap
 	ld hl,0
-	call border_fill
-	ld hl,CLEAN_Y
 	jp border_fill
 
 ; HL = y origin of a buffer: fill everything outside the 480x200 window
@@ -197,38 +261,39 @@ fill_rect_y:                    ; same as fill_rect_hl, y in HL
 fill_rect_hl:
 	; DE = x, HL = y, BC = width (even, 512 only from x 0), A = height;
 	; colour PAL_BORDER
-	ld (cmdblk+4),de
-	ld (cmdblk+6),hl
-	ld (cmdblk+10),a
-	xor a
-	ld (cmdblk+11),a
-	ld a,b
-	cp 2
-	jr c,frh_one
-	ld hl,256                   ; NX has 9 bits: two halves
-	ld (cmdblk+8),hl
-	call frh_go
-	ld a,1
-	ld (cmdblk+5),a             ; x 256
-	jr frh_go
-frh_one:
-	ld (cmdblk+8),bc
-frh_go:
-	ld a,PAL_BORDER*$11
-	jp hmmv
-
-; the same rectangle on the clean copy (HL = its y) and on the display
-fill_both:
-	push af
-	push bc
-	push de
+	ld (blit_rows),a
+	srl b
+	rr c                        ; byte count (0 means 256)
+	ld a,c
+	ld (blit_bytes),a
+	srl d
+	rr e
+	ld a,e
+	ld (blit_dx),a
 	push hl
-	call fill_rect_hl
+	ld hl,BUF
+	ld b,0
+frh_pixels:
+	ld (hl),PAL_BORDER*$11
+	inc hl
+	djnz frh_pixels
 	pop hl
+frh_row:
+	ld a,(blit_bytes)
+	ld b,a
+	ld a,(blit_dx)
+	ld de,BUF
+	call framebuffer_write
+	inc hl
+	ld a,(blit_rows)
+	dec a
+	ld (blit_rows),a
+	jr nz,frh_row
+	ret
+
+; Fill the logical clean-buffer rectangle in RAM.
+fill_both:
 	dec h                       ; y - 256
-	pop de
-	pop bc
-	pop af
 	jp fill_rect_hl
 
 ; ============================================================================
@@ -532,6 +597,27 @@ chd_prepare:
 chp_l:
 	ld a,(hl)
 	inc l
+	or a
+	jr nz,chp_bits
+	ld (de),a                   ; eight clean characters
+	inc e
+	ld (de),a
+	inc e
+	ld (de),a
+	inc e
+	ld (de),a
+	inc e
+	ld (de),a
+	inc e
+	ld (de),a
+	inc e
+	ld (de),a
+	inc e
+	ld (de),a
+	inc e
+	jr chp_n
+chp_bits:
+	ld (any_chd),a
 	ld b,8
 chp_8:
 	push af
@@ -539,12 +625,8 @@ chp_8:
 	ld (de),a
 	pop af
 	rrca
-	inc de
+	inc e
 	djnz chp_8
-	or a
-	or a
-	jr z,chp_n
-	ld (any_chd),a
 chp_n:
 	dec c
 	jr nz,chp_l
@@ -705,6 +787,79 @@ rd_cells:
 	ld hl,(row_scr)             ; HL -> screen
 	ld bc,0                     ; B = any dirty, C = column
 rdc_loop:
+	; at a group start, skip all eight cells when nothing in the group changed
+	ld a,c
+	and 7
+	jr nz,rdc_cell
+	push hl
+	ld a,c
+	rrca
+	rrca
+	rrca                        ; group (C is a multiple of 8)
+	add a,rd_sgrp & 255
+	ld l,a
+	ld h,rd_sgrp/256
+	ld a,(hl)
+	or a
+	jr nz,rdc_grp_busy
+	ld a,(row_mode)
+	bit 1,a
+	ld a,(any_chd)
+	jr z,rdc_grp_test
+	ld a,c
+	rrca
+	rrca
+	rrca
+	add a,rd_grp & 255
+	ld l,a
+	ld h,rd_grp/256
+	ld a,(hl)
+rdc_grp_test:
+	or a
+	jr nz,rdc_grp_busy
+	ld a,c
+	add a,celldirty & 255
+	ld l,a
+	ld h,celldirty/256
+	xor a
+	ld (hl),a
+	inc l
+	ld (hl),a
+	inc l
+	ld (hl),a
+	inc l
+	ld (hl),a
+	inc l
+	ld (hl),a
+	inc l
+	ld (hl),a
+	inc l
+	ld (hl),a
+	inc l
+	ld (hl),a
+	pop hl
+	push bc
+	ld bc,8
+	add hl,bc                   ; screen
+	ex de,hl
+	add hl,bc                   ; colour RAM
+	ex de,hl
+	ld bc,80
+	add iy,bc                   ; shadow
+	ld bc,64
+	add ix,bc                   ; bitmap
+	pop bc
+	ld a,c
+	add a,8
+	ld c,a
+	cp 40
+	jp nz,rdc_loop
+	ld a,b
+	or a
+	ret
+rdc_grp_busy:
+	pop hl
+rdc_cell:
 	push hl
 	ld a,c
 	rrca
@@ -896,7 +1051,7 @@ gb_v:
 ; The game is building a new screen when many character rows change their
 ; display mode at once (text <-> bitmap, display off/on); that never happens
 ; while racing.  The display stays blank (calm_flips = $FF, the kernel blanks
-; at the page flip) until the redraws have been small for 10 frames, at most
+; at vblank) until the redraws have been small for 10 frames, at most
 ; ~3 seconds, so the half-built screen is not shown.
 screen_change:
 	ld hl,blank_req
@@ -1090,7 +1245,7 @@ row_y_clean:
 	add hl,de
 	ret
 
-; render run_len cells from run_start into BUF, send with LMMC, copy to display
+; Render run_len cells into BUF and update the clean RAM bitmap.
 draw_run:
 	ld a,(run_len)
 	ld b,a
@@ -1143,49 +1298,25 @@ dr_cell:
 	ld e,a
 	ld d,0
 	add hl,de
-	ld (cmdblk+0),hl            ; SX
-	ld (cmdblk+4),hl            ; DX
 	srl h
 	rr l
 	ld a,l
 	ld (spr_tmp+20),a           ; x byte
 	ld a,(cur_row)
 	call row_y_clean
-	ld (cmdblk+2),hl            ; SY
-	dec h
-	ld (cmdblk+6),hl            ; DY: display
-	ld a,(run_len)
-	ld l,a
-	ld h,0
-	add hl,hl
-	add hl,hl
-	ld d,h
-	ld e,l
-	add hl,hl
-	add hl,de                   ; 12k
-	ld (cmdblk+8),hl
-	ld hl,8
-	ld (cmdblk+10),hl
-	; the pixels into the clean copy, line by line
-	ld hl,(cmdblk+2)
+	dec h                       ; display y
 	ld de,BUF
 	ld c,8
 dr_send:
 	push bc
-	ld a,(spr_tmp+20)
-	call vram_wr
 	ld a,(stride)
 	ld b,a
-	ld c,VDP_DATA
-	ex de,hl
-	otir
-	ex de,hl
+	ld a,(spr_tmp+20)
+	call framebuffer_write
 	inc hl
 	pop bc
 	dec c
 	jr nz,dr_send
-	; and on to the display
-	call hmmm
 	jp csel_fix
 
 ; 38-column mode: border over the outer columns of this row
@@ -1579,65 +1710,189 @@ cp_line:
 	ret
 
 ; ============================================================================
-; V9958 (cmdblk = R#32..R#46: +0 SX, +2 SY, +4 DX, +6 DY, +8 NX, +10 NY,
-; +12 CLR, +13 ARG, +14 CMD)
+; RAM bitmap and scanline composition
 ; ============================================================================
-; wait for the command engine (status register 2, CE)
-v_wait:
-	di
-	ld a,2
-	ld (vdp_r15),a              ; the interrupts put it back after their reads
-	out (VDP_CTRL),a
-	ld a,$8F
-	out (VDP_CTRL),a
-	ei
-vwt_l:
-	in a,(VDP_CTRL)
+; HL = display y, A = x byte -> HL = mapped clean-bitmap address.
+; Keeps BC, DE. Mapper changes must also be visible to nested vblanks.
+framebuffer_addr:
+	push af
+	ld a,l
+	rlca
+	rlca
+	and 3
+	add a,SEG_FRAME
+	ld (cur_p2),a
+	out (PORT_P2),a
+	pop af
+	ld h,l
+	ld l,a
+	ld a,h
+	and $3F
+	or $80
+	ld h,a
+	ret
+
+; HL = display y, A = first byte, B = byte count (0 = 256). Keeps BC, DE, HL.
+damage_mark:
+	push bc
+	push de
+	push hl
+	ld c,a
+	add a,b
+	dec a
 	rrca
-	jr c,vwt_l
-	di
-	xor a
-	ld (vdp_r15),a
-	out (VDP_CTRL),a
-	ld a,$8F
-	out (VDP_CTRL),a
-	ei
+	rrca
+	rrca
+	rrca
+	and 15
+	ld e,a
+	ld a,c
+	rrca
+	rrca
+	rrca
+	rrca
+	and 15
+	ld c,a
+	ld a,e
+	sub c
+	inc a
+	ld b,a
+	ld h,0
+	add hl,hl
+	ld de,DAMAGE
+	add hl,de
+	ld a,c
+	cp 8
+	jr c,dm_low
+	inc hl
+	sub 8
+dm_low:
+	ld c,a
+	push bc
+	ld b,a
+	inc b
+	ld a,$80
+dm_bit:
+	rlca
+	djnz dm_bit
+	pop bc
+	ld c,a
+dm_span:
+	or (hl)
+	ld (hl),a
+	rlc c
+	jr nc,dm_same_byte
+	inc hl
+dm_same_byte:
+	ld a,c
+	djnz dm_span
+dm_done:
+	pop hl
+	pop de
+	pop bc
 	ret
 
-v_send_cmd:                     ; R#32..R#46 through the indirect port
-	call v_wait
-	di
-	ld a,32
-	out (VDP_CTRL),a
-	ld a,$91                    ; R#17 = 32, auto increment
-	out (VDP_CTRL),a
-	ei
-	ld hl,cmdblk
-	ld bc,15*256+VDP_IND
-	otir
+; Write B bytes (0 = 256) from DE into the clean bitmap at (A, HL).
+; Keeps BC and HL; advances DE and restores the VIC-bank mapping.
+; Bytes that are already in the bitmap are not marked as damaged: a VDP
+; write costs about 60 R800 cycles on the turbo R, a compare almost nothing.
+framebuffer_write:
+	push hl
+	push bc
+	push hl                     ; display y
+	ld c,a
+	call framebuffer_addr
+	ld a,(fbw_all)
+	or a
+	jr nz,fbw_force
+fbw_find:                       ; skip the unchanged head
+	ld a,(de)
+	cp (hl)
+	jr nz,fbw_diff
+	inc de
+	inc hl
+	inc c
+	djnz fbw_find
+	pop hl                      ; nothing changed
+	jr fbw_done
+fbw_diff:
+	push bc                     ; C = first changed byte
+	ld a,c
+	ld (fbw_last),a
+fbw_copy:
+	ld a,(de)
+	cp (hl)
+	jr z,fbw_same
+	ld (hl),a
+	ld a,c
+	ld (fbw_last),a
+fbw_same:
+	inc de
+	inc hl
+	inc c
+	djnz fbw_copy
+	pop bc
+	pop hl                      ; display y
+	ld a,(fbw_last)
+	sub c
+	inc a
+	ld b,a                      ; first..last changed byte (0 = 256)
+	ld a,c
+	call damage_mark
+fbw_done:
+	call k_map_vic
+	pop bc
+	pop hl
+	ret
+fbw_force:                      ; first frame: the bitmap and VRAM may differ
+	ex (sp),hl
+	ld a,c
+	call damage_mark
+	pop hl
+	ex de,hl
+	ld c,b
+	ld b,0
+	ld a,c
+	or a
+	jr nz,fbw_ldir
+	inc b
+fbw_ldir:
+	ldir
+	ex de,hl
+	jr fbw_done
+
+; A = cache slot, L = source y, E = source x byte -> HL = mapped address.
+sprite_addr:
+	ld b,a
+	and 7
+	add a,a
+	add a,a
+	add a,a
+	or $C0
+	ld d,a
+	ld a,b
+	rrca
+	rrca
+	rrca
+	and 1
+	add a,SEG_SPRITES
+	ld (cur_p3),a
+	out (PORT_P3),a
+	ld h,0
+	add hl,hl
+	add hl,hl
+	add hl,hl                    ; y * 8
+	ld b,h
+	ld c,l
+	add hl,hl
+	add hl,hl
+	add hl,bc                    ; y * 40
+	ld c,e
+	ld b,d
+	add hl,bc
 	ret
 
-; HMMV fill: DX, DY, NX, NY set; A = colour byte
-hmmv:
-	ld (cmdblk+12),a
-	ld a,$C0
-	jr cmd_arg0
-
-; HMMM copy: SX, SY, DX, DY, NX, NY set (x even)
-hmmm:
-	ld a,$D0
-	jr cmd_arg0
-
-; LMMM copy skipping colour 0 (TIMP): SX, SY, DX, DY, NX, NY set
-lmmm_tp:
-	ld a,$98
-cmd_arg0:
-	ld (cmdblk+14),a
-	xor a
-	ld (cmdblk+13),a            ; ARG: left to right, top to bottom
-	jp v_send_cmd
-
-; set the VRAM write address: HL = y (0..511), A = x / 2.  Keeps BC, DE, HL.
+; Set the VRAM write address: HL = y, A = x byte. Keeps BC, DE, HL.
 vram_wr:
 	push af
 	ld a,l
@@ -1656,9 +1911,326 @@ vw_lo:
 	out (VDP_CTRL),a            ; A7-A0
 	ld a,l
 	and $3F
-	or $40                      ; A13-A8, write
+	or $40
 	out (VDP_CTRL),a
 	ei
+	ret
+
+flush_damage:
+	xor a
+	ld (flush_y),a
+	ld hl,DAMAGE
+flush_scan:                     ; HL -> DAMAGE word of flush_y
+	ld a,(hl)
+	inc hl
+	or (hl)
+	inc hl
+	jr nz,flush_row
+	ld a,(flush_y)
+	inc a
+	ld (flush_y),a
+	cp 212
+	jr c,flush_scan
+	ret
+flush_row:
+	ld (flush_ptr),hl
+	dec hl
+	ld d,(hl)
+	dec hl
+	ld e,(hl)
+	ld (flush_mask),de
+	xor a
+	ld (flush_chunk),a
+flush_spans:
+	ld hl,(flush_mask)
+	ld a,l
+	or a
+	jr nz,flush_bits
+	or h
+	jp z,flush_next
+	ld l,h                      ; eight clean chunks at once
+	ld h,0
+	ld a,(flush_chunk)
+	add a,8
+	ld (flush_chunk),a
+flush_bits:
+	srl h
+	rr l
+	ld (flush_mask),hl
+	ld a,(flush_chunk)
+	ld e,a
+	inc a
+	ld (flush_chunk),a
+	jr nc,flush_spans
+	ld a,e
+	add a,a
+	add a,a
+	add a,a
+	add a,a
+	ld (flush_x),a
+	ld b,1
+flush_run:
+	bit 0,l
+	jr z,flush_have
+	srl h
+	rr l
+	inc b
+	ld a,(flush_chunk)
+	inc a
+	ld (flush_chunk),a
+	jr flush_run
+flush_have:
+	ld (flush_mask),hl
+	ld a,b
+	add a,a
+	add a,a
+	add a,a
+	add a,a
+	ld (flush_bytes),a
+	ld c,a
+	ld b,0
+	jr nz,flush_read
+	inc b
+flush_read:
+	ld a,(flush_y)
+	ld l,a
+	ld h,0
+	ld a,(flush_x)
+	call framebuffer_addr
+	ld a,(flush_x)
+	ld e,a
+	ld d,BUF/256
+	ldir
+	xor a
+	ld (flush_sprite),a
+flush_sprites:
+	ld a,(spr_n)
+	ld hl,flush_sprite
+	cp (hl)
+	jr z,flush_send
+	ld a,(hl)
+	ld l,a
+	ld h,0
+	add hl,hl
+	add hl,hl
+	add hl,hl
+	ld de,DRAWN
+	add hl,de
+	push hl
+	pop iy
+	ld a,(flush_y)
+	sub (iy+2)
+	jr c,flush_sprite_next
+	cp (iy+5)
+	call c,compose_if_visible
+flush_sprite_next:
+	ld hl,flush_sprite
+	inc (hl)
+	jr flush_sprites
+flush_send:
+	ld a,(flush_y)
+	ld l,a
+	ld h,0
+	ld a,(flush_x)
+	call vram_wr
+	ld a,(flush_x)
+	ld l,a
+	ld h,BUF/256
+	ld a,(flush_bytes)
+	ld b,a
+	ld c,VDP_DATA
+	call vram_upload
+	jp flush_spans
+flush_next:
+	ld hl,flush_y
+	inc (hl)
+	ld a,(hl)
+	ld hl,(flush_ptr)
+	cp 212
+	jp c,flush_scan
+	ret
+
+compose_if_visible:
+	push af
+	ld l,(iy+0)
+	ld h,(iy+1)
+	ld e,(iy+3)
+	ld d,0
+	add hl,de
+	inc hl
+	srl h
+	rr l
+	ld a,(flush_x)
+	ld e,a
+	or a
+	sbc hl,de
+	jr c,civ_skip
+	jr z,civ_skip
+	ld a,(flush_x)
+	ld e,a
+	ld a,(flush_bytes)
+	ld l,a
+	ld h,0
+	or a
+	jr nz,civ_width
+	inc h
+civ_width:
+	add hl,de
+	ld e,(iy+0)
+	ld d,(iy+1)
+	srl d
+	rr e
+	or a
+	sbc hl,de
+	jr c,civ_skip
+	jr z,civ_skip
+	pop af
+	jp compose_sprite
+civ_skip:
+	pop af
+	ret
+
+; Dirty spans are multiples of 16 bytes. Avoid block-repeat I/O on the R800.
+vram_upload:
+	outi
+	outi
+	outi
+	outi
+	outi
+	outi
+	outi
+	outi
+	outi
+	outi
+	outi
+	outi
+	outi
+	outi
+	outi
+	outi
+	jp nz,vram_upload
+	ret
+
+; A = row within IY's sprite. Merge its cached pixels into BUF in priority
+; order, preserving transparent nibbles and odd left/right edges.
+compose_sprite:
+	ld b,a
+	ld a,(flush_sprite)
+	add a,a
+	ld l,a
+	ld h,SP_SOURCE/256
+	ld a,(hl)
+	ld (blit_sx),a
+	inc hl
+	ld a,(hl)
+	add a,b
+	ld (blit_rows),a
+	ld a,(blit_sx)
+	and 1
+	ld c,a
+	ld a,(iy+3)
+	add a,c
+	inc a
+	srl a
+	ld (blit_srcbytes),a
+	ld a,(iy+0)
+	and 1
+	ld (blit_first),a
+	ld b,a
+	ld a,(iy+3)
+	add a,b
+	ld e,a
+	and 1
+	ld (blit_last),a
+	ld a,e
+	inc a
+	srl a
+	ld (blit_bytes),a
+	ld a,b
+	xor c
+	jr z,blit_aligned
+	ld a,1
+	bit 0,c
+	jr z,blit_aligned
+	inc a
+blit_aligned:
+	ld (blit_phase),a
+	ld l,(iy+0)
+	ld h,(iy+1)
+	srl h
+	rr l
+	ld h,BUF/256
+	ld (blit_dst),hl
+	ld a,(blit_sx)
+	srl a
+	ld e,a
+	ld a,(blit_rows)
+	ld l,a
+	ld a,(iy+7)
+	call sprite_addr
+	ld de,FG
+	ld a,(blit_srcbytes)
+	ld c,a
+	ld b,0
+	ldir
+	ex de,hl
+	ld (hl),0
+	ld a,(blit_phase)
+	or a
+	jr z,blit_edges
+	dec a
+	jr nz,blit_left
+	ld hl,FG
+	ld a,(blit_bytes)
+	ld b,a
+	xor a
+blit_right_loop:
+	rrd
+	inc hl
+	djnz blit_right_loop
+	jr blit_edges
+blit_left:
+	dec hl
+	ld a,(blit_srcbytes)
+	ld b,a
+	xor a
+blit_left_loop:
+	rld
+	dec hl
+	djnz blit_left_loop
+blit_edges:
+	ld a,(blit_first)
+	or a
+	jr z,blit_tail
+	ld a,(FG)
+	and $0F
+	ld (FG),a
+blit_tail:
+	ld a,(blit_last)
+	or a
+	jr z,blit_pixels
+	ld a,(blit_bytes)
+	dec a
+	ld l,a
+	ld h,FG/256
+	ld a,(hl)
+	and $F0
+	ld (hl),a
+blit_pixels:
+	ld hl,FG
+	ld ix,(blit_dst)
+	ld d,SPR_MASK/256
+	ld a,(blit_bytes)
+	ld b,a
+blit_merge:
+	ld e,(hl)
+	ld a,(de)
+	and (ix+0)
+	or (hl)
+	ld (ix+0),a
+	inc hl
+	inc ix
+	djnz blit_merge
 	ret
 
 ; ============================================================================
@@ -1669,7 +2241,44 @@ vw_lo:
 sprites:
 	ld hl,sc_frame
 	inc (hl)
-	call sp_erase
+	ld a,(spr_n)
+	ld (old_spr_n),a
+	ld hl,DRAWN
+	ld de,OLD_DRAWN
+	ld bc,128
+	ldir
+	ld hl,SP_SOURCE
+	ld de,OLD_SOURCE
+	ld bc,32
+	ldir
+	ld a,(spr_n)
+	or a
+	jr z,sprites_start
+	ld b,a
+	ld ix,DRAWN
+	ld de,OLD_KEY
+sprites_save_key:
+	push bc
+	push de
+	ld l,(ix+7)
+	ld h,0
+	add hl,hl
+	add hl,hl
+	add hl,hl
+	add hl,hl
+	ld bc,SCACHE
+	add hl,bc
+	ld bc,5
+	ldir
+	pop de
+	ld hl,5
+	add hl,de
+	ex de,hl
+	ld bc,8
+	add ix,bc
+	pop bc
+	djnz sprites_save_key
+sprites_start:
 	xor a
 	ld (spr_n),a
 	ld (coll_acc),a
@@ -1709,44 +2318,161 @@ sp_done:
 	ld (hl),a
 	ret
 
-; last frame's sprites: their rectangles back from the clean copy
-sp_erase:
+; Static sprites need no upload unless their background, pixels or position
+; changed. A changed sprite damages both its old and new rectangle.
+sprite_changes:
+	ld a,(old_spr_n)
+	ld b,a
 	ld a,(spr_n)
+	cp b
+	jr nc,sch_count
+	ld a,b
+sch_count:
 	or a
 	ret z
 	ld b,a
-	ld ix,DRAWN
-spe_l:
+	ld c,0
+sch_loop:
 	push bc
+	ld a,(old_spr_n)
+	cp c
+	jr z,sch_new
+	jr c,sch_new
+	ld a,(spr_n)
+	cp c
+	jr z,sch_old
+	jr c,sch_old
+	call sch_ptrs
+	push hl
+	push de
+	ld b,8
+sch_cmp:
+	ld a,(de)
+	cp (hl)
+	jr nz,sch_diff
+	inc hl
+	inc de
+	djnz sch_cmp
+	pop de
+	pop hl
+	ld a,c
+	add a,a
+	ld l,a
+	ld h,SP_SOURCE/256
+	add a,OLD_SOURCE & 255
+	ld e,a
+	ld d,OLD_SOURCE/256
+	ld a,(de)
+	cp (hl)
+	jr nz,sch_both
+	inc hl
+	inc de
+	ld a,(de)
+	cp (hl)
+	jr nz,sch_both
+	call sch_ptrs
+	ld de,7
+	add hl,de
+	ld l,(hl)
+	ld h,0
+	add hl,hl
+	add hl,hl
+	add hl,hl
+	add hl,hl
+	ld de,SCACHE
+	add hl,de
+	push hl
+	ld a,c
+	add a,a
+	add a,a
+	add a,c
+	ld e,a
+	ld d,OLD_KEY/256
+	ld b,5
+sch_key:
+	ld a,(de)
+	cp (hl)
+	jr nz,sch_key_diff
+	inc de
+	inc hl
+	djnz sch_key
+	pop hl
+	ld l,(hl)                  ; sprite pointer indexes its dirty 64-byte chunk
+	ld h,VDW/256
+	ld a,(hl)
+	or a
+	jr z,sch_next
+	jr sch_both
+sch_key_diff:
+	pop hl
+	jr sch_both
+sch_diff:
+	pop de
+	pop hl
+sch_both:
+	call sch_ptrs
+	push bc
+	push hl
+	ex de,hl
+	push hl
+	pop ix
+	call sprite_damage
+	pop ix
+	call sprite_damage
+	pop bc
+	jr sch_next
+sch_old:
+	call sch_ptrs
+	ex de,hl
+	jr sch_mark
+sch_new:
+	call sch_ptrs
+sch_mark:
+	push hl
+	pop ix
+	call sprite_damage
+sch_next:
+	pop bc
+	inc c
+	dec b
+	jp nz,sch_loop
+	ret
+sch_ptrs:
+	ld l,c
+	ld h,0
+	add hl,hl
+	add hl,hl
+	add hl,hl
+	ld de,DRAWN
+	add hl,de
+	push hl
+	ld de,OLD_DRAWN-DRAWN
+	add hl,de
+	ex de,hl
+	pop hl
+	ret
+
+sprite_damage:
 	ld l,(ix+0)
 	ld h,(ix+1)
-	ld a,l
-	and $FE
-	ld l,a                      ; x even
-	ld (cmdblk+0),hl
-	ld (cmdblk+4),hl
+	srl h
+	rr l
+	ld c,l
 	ld a,(ix+0)
 	and 1
 	add a,(ix+3)
 	inc a
-	and $FE                     ; even width that covers the sprite
-	ld l,a
-	ld h,0
-	ld (cmdblk+8),hl
+	srl a
+	ld b,a
 	ld l,(ix+2)
-	ld (cmdblk+6),hl
-	inc h
-	ld (cmdblk+2),hl            ; y + CLEAN_Y
-	ld l,(ix+5)
 	ld h,0
-	ld (cmdblk+10),hl
-	push ix
-	call hmmm
-	pop ix
-	ld de,8
-	add ix,de
-	pop bc
-	djnz spe_l
+	ld e,(ix+5)
+sd_row:
+	ld a,c
+	call damage_mark
+	inc l
+	dec e
+	jr nz,sd_row
 	ret
 
 ; draw sprites 7..0 of record rgn_rec whose first line falls in [rgn_lo, rgn_hi)
@@ -1991,19 +2717,28 @@ spo_hok:
 	ld (cmdblk+10),hl
 	ld hl,(spr_tmp+8)
 	ld (cmdblk+2),hl
+	ld a,(spr_n)
+	add a,a
+	ld l,a
+	ld h,SP_SOURCE/256
+	ld a,(cmdblk)
+	ld (hl),a
+	inc hl
+	ld a,(cmdblk+2)
+	ld (hl),a
 	; collision bounding box in screen coordinates
 	call sp_coll
+	ld a,(spr_tmp+15)
+	ld (ix+7),a                 ; cache slot for scanline composition
 	ld hl,spr_n
 	inc (hl)
-	jp lmmm_tp
+	ret
 
 ; --- sprite-sprite collision on tight bounding boxes --------------------------
-; this sprite: IX entry (x,y,w,h) + bbox from the cache slot in spr_tmp+10..13
+; This sprite: IX entry (x,y,w,h).
 sp_coll:
 	ld a,(rgn_idx)
 	ld (ix+6),a
-	ld a,(spr_tmp+10)
-	ld (ix+7),a                 ; bbox packed: store x0..x1/y0..y1 offsets
 	ld a,(spr_n)
 	or a
 	ret z
@@ -2240,35 +2975,8 @@ spc_stamp:
 	ld a,(sc_frame)
 	ld (hl),a                   ; last use
 spc_pos:
-	; slot position: column = slot % 7, row = slot / 7
-	ld a,(spr_tmp+15)
-	ld c,0
-spc_div:
-	cp 7
-	jr c,spc_dd
-	sub 7
-	inc c
-	jr spc_div
-spc_dd:
-	; x = col*72
-	ld l,a
-	ld h,0
-	add hl,hl
-	add hl,hl
-	add hl,hl
-	ld d,h
-	ld e,l
-	add hl,hl
-	add hl,hl
-	add hl,hl
-	add hl,de                   ; *72
-	ld de,SC_Y0
-	ld a,c
-	or a
-	jr z,spc_y
-	ld de,SC_Y1
-spc_y:
-	ld (spr_tmp+8),de
+	ld hl,0
+	ld (spr_tmp+8),hl
 	or a
 	ret
 
@@ -2464,14 +3172,8 @@ spr_hi:
 	ld (cell_cols+2),a
 spr_cols:
 	call nt_build
-	; into the slot, line by line (a copy from it may still be running)
-	call v_wait
-	call spc_pos
-	srl h
-	rr l
-	ld a,l
-	ld (spr_tmp+18),a           ; x byte
-	ld hl,(spr_tmp+8)
+	; Into the RAM slot, line by line.
+	ld hl,0
 	ld (spr_tmp+16),hl          ; line
 	; source: VIC bank + pointer*64 (Z80 $8000 based)
 	ld a,(spr_tmp+10)
@@ -2520,16 +3222,19 @@ spr_byte:
 	ret
 spr_send:
 	ld hl,(spr_tmp+16)
-	ld a,(spr_tmp+18)
-	call vram_wr
 	inc hl
 	ld (spr_tmp+16),hl
+	dec hl
+	ld e,0
+	ld a,(spr_tmp+15)
+	call sprite_addr
+	ex de,hl
 	ld hl,BUF
 	ld a,(spr_tmp+6)
 	srl a
-	ld b,a
-	ld c,VDP_DATA
-	otir
+	ld c,a
+	ld b,0
+	ldir
 	ret
 ; nibble A (low 4 bits) -> 3 bytes at IX (6 bytes if x-expanded)
 spr_nib:
@@ -2604,4 +3309,5 @@ r_c64_pal:
 	db $44,$04, $54,$07, $37,$04, $66,$06
 
 region_render_end:
-	defs NT-region_render_end,0
+	defs LTL-region_render_end,0
+	defs NT-LTL,0
