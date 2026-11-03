@@ -81,6 +81,13 @@ MAX_SPR:         equ 16
 
 ; ============================================================================
 SHADOW:          equ $C000           ; 1000 cells x 10 bytes in SEG_SHADOW
+; back-page sync state, also in SEG_SHADOW (above the cell shadow)
+SH_SPR:          equ $F000           ; 2 pages x 16 x 8: sprites drawn last time on a page
+SH_ROWS:         equ $F100           ; 25 flags: clean rows changed this frame
+SH_ROWP:         equ SH_ROWS+32      ; 25 flags: clean rows changed last frame
+SH_PG:           equ $F140           ; [0..1] sprites drawn per page, [2..3] page built
+SH_CUR_PG:       equ SH_PG+4         ; page being synced
+SH_EARLY:        equ SH_CUR_PG+1     ; 1: rows were synced to the back page during this render
 
 render:
 	call k_map_vic
@@ -124,12 +131,32 @@ r_clr2:
 	xor a
 	ld (dbg_full),a
 	call tl_begin
+	; back page only changes in vblank when flip_pending is set, so
+	; with it clear the page is stable for the whole rows phase
+	ld a,(flip_pending)
+	xor 1
+	ld (SH_EARLY),a
+	ld a,(page_back)
+	ld (SH_CUR_PG),a
 	xor a
 rr_loop:
 	ld (cur_row),a
 	call row_setup
 	call row_dirty
 	call nz,row_render
+	ld a,(SH_EARLY)
+	or a
+	jr z,rr_next
+	; a row is final once its render is done: copy it now
+	ld a,(cur_row)
+	ld e,a
+	ld d,0
+	ld hl,SH_ROWS
+	add hl,de
+	ld a,(hl)
+	or a
+	call nz,sync_row
+rr_next:
 	ld a,(cur_row)
 	inc a
 	cp 25
@@ -151,6 +178,11 @@ rf1:
 	ld (hl),1
 	inc hl
 	djnz rf1
+	ld hl,SH_ROWS
+	ld de,SH_ROWS+1
+	ld bc,SH_CUR_PG-SH_ROWS
+	ld (hl),0
+	ldir
 	; border colour around the C64 screen in all three buffers
 	ld hl,0
 	call border_fill
@@ -1103,9 +1135,14 @@ row_blank:
 	call fill_rect_hl
 	ret
 
-; A = row -> HL = y in the clean buffer
+; A = row -> HL = y in the clean buffer; the row is marked changed
 row_y_clean:
-	ld l,a
+	ld e,a
+	ld d,0
+	ld hl,SH_ROWS
+	add hl,de
+	ld (hl),1
+	ld l,e
 	ld h,0
 	add hl,hl
 	add hl,hl
@@ -1686,26 +1723,172 @@ lmmm_tp:
 ; ============================================================================
 ; sprites
 ; ============================================================================
-sprites:
-	; back page = clean playfield (the V9990 copies while we go on).
-	; only the active 480x200 playfield needs copying: the border is
-	; filled once in render_first and never touched again, in either
-	; clean or display buffer, so re-copying it every frame is wasted
-	; V9990 bus time (sprites never reach outside the playfield either).
+; B = sprites to restore, IX -> their DRAWN records: copy each rectangle
+; from the clean buffer to the page being built
+erase_hist:
+	ld a,b
+	or a
+	ret z
+	ld a,(SH_CUR_PG)
+	ld (cmdblk+7),a
+eh_loop:
+	push bc
+	push ix
+	ld l,(ix+0)
+	ld h,(ix+1)
+	ld (cmdblk+0),hl
+	ld (cmdblk+4),hl
+	ld l,(ix+3)
+	ld h,(ix+4)
+	ld (cmdblk+8),hl
+	ld a,(ix+5)
+	ld l,a
+	ld h,0
+	ld (cmdblk+10),hl
+	ld a,(ix+2)
+	ld l,a
+	ld h,0
+	ld de,CLEAN_Y
+	add hl,de
+	ld (cmdblk+2),hl
+	ld a,(ix+2)
+	ld (cmdblk+6),a
+	call lmmm
+	pop ix
+	ld de,8
+	add ix,de
+	pop bc
+	djnz eh_loop
+	ret
+
+; C = 1: sync every row; otherwise rows changed this or last frame.
+; E = row index on entry to sync_row
+sync_rows:
+	ld d,0
+	ld e,0
+sr_loop:
+	ld a,c
+	or a
+	jr nz,sr_do
+	ld hl,SH_ROWS
+	add hl,de
+	ld b,(hl)                   ; changed this frame
+	ld a,(SH_EARLY)
+	or a
+	jr z,sr_old
+	; changed this frame were already copied by render; only last frame's
+	ld a,b
+	or a
+	jr nz,sr_next
+	ld hl,SH_ROWP
+	add hl,de
+	ld a,(hl)
+	or a
+	jr z,sr_next
+	jr sr_do
+sr_old:
+	ld a,b
+	ld hl,SH_ROWP
+	add hl,de
+	or (hl)
+	jr z,sr_next
+sr_do:
+	call sync_row
+sr_next:
+	inc e
+	ld a,e
+	cp 25
+	jr nz,sr_loop
+	ret
+
+; copy the 480x8 strip of row E from clean to the page being built
+sync_row:
+	push bc
+	push de
+	ld l,e
+	ld h,0
+	add hl,hl
+	add hl,hl
+	add hl,hl
+	ld de,SCREEN_Y
+	add hl,de
+	ld a,l
+	ld (cmdblk+6),a
+	ld a,(SH_CUR_PG)
+	ld (cmdblk+7),a
+	push hl
+	ld bc,CLEAN_Y
+	add hl,bc
+	ld (cmdblk+2),hl
 	ld hl,SCREEN_X
 	ld (cmdblk+0),hl
 	ld (cmdblk+4),hl
-	ld hl,CLEAN_Y+SCREEN_Y
-	ld (cmdblk+2),hl
-	ld a,(page_back)
-	ld h,a
-	ld l,SCREEN_Y
-	ld (cmdblk+6),hl
 	ld hl,480
 	ld (cmdblk+8),hl
-	ld hl,200
+	ld hl,8
 	ld (cmdblk+10),hl
+	pop hl
 	call lmmm
+	pop de
+	pop bc
+	ret
+
+
+
+; keep this frame's drawn sprites for the page, for the next erase
+sp_save:
+	ld a,(SH_CUR_PG)
+	ld e,a
+	ld d,0
+	ld hl,SH_PG
+	add hl,de
+	ld a,(spr_n)
+	ld (hl),a
+	or a
+	ret z
+	add a,a
+	add a,a
+	add a,a
+	ld c,a
+	ld b,0
+	ld hl,DRAWN
+	ld de,SH_SPR
+	ld a,(SH_CUR_PG)
+	or a
+	jr z,ss_cp
+	ld de,SH_SPR+128
+ss_cp:
+	ldir
+	ret
+
+sprites:
+	; the back page still holds its own last sprites: restore their
+	; rectangles from the clean playfield, then the rows that changed
+	; since this page was last built (a full copy if it was never built)
+	ld a,(page_back)
+	ld (SH_CUR_PG),a
+	ld e,a
+	ld d,0
+	ld hl,SH_PG+2
+	add hl,de
+	ld a,(hl)
+	ld (hl),1
+	xor 1
+	ld c,a                      ; C = 1: copy every row
+	ld hl,SH_PG
+	add hl,de
+	ld b,(hl)                   ; B = sprites last drawn on this page
+	push bc
+	ld ix,SH_SPR
+	ld a,e
+	or a
+	jr z,sp_h0
+	ld de,128
+	add ix,de
+sp_h0:
+	call erase_hist
+	pop bc
+	call sync_rows
 sp_erased:
 	xor a
 	ld (spr_n),a
@@ -1744,6 +1927,17 @@ sp_done:
 	ld hl,coll_ss
 	or (hl)
 	ld (hl),a
+	call sp_save
+	; this frame's changed rows become "last frame" for the other page
+	ld hl,SH_ROWS
+	ld de,SH_ROWP
+	ld bc,25
+	ldir
+	ld hl,SH_ROWS
+	ld de,SH_ROWS+1
+	ld bc,24
+	ld (hl),0
+	ldir
 	; the back page is complete: shown from the next vblank
 	ld a,1
 	ld (flip_pending),a
