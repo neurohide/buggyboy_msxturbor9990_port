@@ -499,25 +499,27 @@ chd_prepare:
 	ld de,CHDIRTY
 	xor a
 	ld (any_chd),a
-	ld c,32
+	ld a,32
+	ld (rgn_idx),a
 chp_l:
 	ld a,(hl)
 	inc l
+	ld c,a
+	or a
+	jr z,chp_fill
+	ld (any_chd),a
+chp_fill:
 	ld b,8
 chp_8:
-	push af
-	and 1                       ; one dirty bit per character
+	srl c
+	ld a,0
+	adc a,0
 	ld (de),a
-	pop af
-	rrca
 	inc de
 	djnz chp_8
-	or a
-	or a
-	jr z,chp_n
-	ld (any_chd),a
-chp_n:
-	dec c
+	ld a,(rgn_idx)
+	dec a
+	ld (rgn_idx),a
 	jr nz,chp_l
 	ret
 
@@ -675,7 +677,12 @@ rd_cells:
 	ld ix,(row_data)            ; bitmap data (bitmap rows)
 	ld hl,(row_scr)             ; HL -> screen
 	ld bc,0                     ; B = any dirty, C = column
-rdc_loop:
+	; row_mode bit 1 (text/bitmap) is constant for all 40 cells of this row:
+	; test it once here instead of on every rdc_loop/rdc_cand iteration below.
+	ld a,(row_mode)
+	bit 1,a
+	jr nz,rdc_loop_b
+rdc_loop_t:
 	push hl
 	ld a,c
 	rrca
@@ -688,50 +695,22 @@ rdc_loop:
 	ld a,(hl)                   ; screen/colour changed in this group
 	pop hl
 	or a
-	jr nz,rdc_cand
-	ld a,(row_mode)
-	bit 1,a
-	jr z,rdc_textc
-	push hl
-	ld a,c
-	and 7
-	add a,bittab & 255
-	ld l,a
-	ld h,bittab/256
-	ld a,c
-	rrca
-	rrca
-	rrca
-	and $1F
-	add a,rd_grp & 255
-	push hl
-	ld l,a
-	ld h,rd_grp/256
-	ld a,(hl)                   ; dirty bits of the cell's group
-	pop hl
-	and (hl)                    ; this cell's bit
-	pop hl
-	jr nz,rdc_cand
-	jp rdc_clean
-rdc_textc:
+	jr nz,rdc_cand_t
 	push hl
 	ld l,(hl)
 	ld h,CHDIRTY/256
 	ld a,(hl)
 	pop hl
 	or a
-	jp z,rdc_clean
-rdc_cand:
+	jp z,rdc_clean_t
+rdc_cand_t:
 	ld a,(hl)
 	cp (iy+0)
-	jp nz,rdc_dirty
+	jp nz,rdc_dirty_t
 	ld a,(de)
 	and $0F
 	cp (iy+1)
-	jp nz,rdc_dirty
-	ld a,(row_mode)
-	bit 1,a
-	jr nz,rdc_bmcmp
+	jp nz,rdc_dirty_t
 	; text: compare the character's 8 bytes
 	push hl
 	push de
@@ -758,44 +737,19 @@ rdc_tl:
 	pop bc
 	pop de
 	pop hl
-	jp rdc_clean
+	jp rdc_clean_t
 rdc_tdiff:
 	pop bc
 	pop de
 	pop hl
-	jp rdc_dirty
-rdc_bmcmp:
-	ld a,(ix+0)
-	cp (iy+2)
-	jp nz,rdc_dirty
-	ld a,(ix+1)
-	cp (iy+3)
-	jp nz,rdc_dirty
-	ld a,(ix+2)
-	cp (iy+4)
-	jp nz,rdc_dirty
-	ld a,(ix+3)
-	cp (iy+5)
-	jp nz,rdc_dirty
-	ld a,(ix+4)
-	cp (iy+6)
-	jp nz,rdc_dirty
-	ld a,(ix+5)
-	cp (iy+7)
-	jp nz,rdc_dirty
-	ld a,(ix+6)
-	cp (iy+8)
-	jp nz,rdc_dirty
-	ld a,(ix+7)
-	cp (iy+9)
-	jp nz,rdc_dirty
-rdc_clean:
+	jp rdc_dirty_t
+rdc_clean_t:
 	xor a
-	jr rdc_store
-rdc_dirty:
+	jr rdc_store_t
+rdc_dirty_t:
 	ld b,1
 	ld a,1
-rdc_store:
+rdc_store_t:
 	push hl
 	push af
 	ld a,c
@@ -816,7 +770,105 @@ rdc_store:
 	inc c
 	ld a,c
 	cp 40
-	jp nz,rdc_loop
+	jp nz,rdc_loop_t
+	ld a,b
+	or a
+	ret
+rdc_loop_b:
+	push hl
+	ld a,c
+	rrca
+	rrca
+	rrca
+	and $1F
+	add a,rd_sgrp & 255
+	ld l,a
+	ld h,rd_sgrp/256
+	ld a,(hl)                   ; screen/colour changed in this group
+	pop hl
+	or a
+	jr nz,rdc_cand_b
+	push hl
+	ld a,c
+	and 7
+	add a,bittab & 255
+	ld l,a
+	ld h,bittab/256
+	ld a,c
+	rrca
+	rrca
+	rrca
+	and $1F
+	add a,rd_grp & 255
+	push hl
+	ld l,a
+	ld h,rd_grp/256
+	ld a,(hl)                   ; dirty bits of the cell's group
+	pop hl
+	and (hl)                    ; this cell's bit
+	pop hl
+	jr nz,rdc_cand_b
+	jp rdc_clean_b
+rdc_cand_b:
+	ld a,(hl)
+	cp (iy+0)
+	jp nz,rdc_dirty_b
+	ld a,(de)
+	and $0F
+	cp (iy+1)
+	jp nz,rdc_dirty_b
+	ld a,(ix+0)
+	cp (iy+2)
+	jp nz,rdc_dirty_b
+	ld a,(ix+1)
+	cp (iy+3)
+	jp nz,rdc_dirty_b
+	ld a,(ix+2)
+	cp (iy+4)
+	jp nz,rdc_dirty_b
+	ld a,(ix+3)
+	cp (iy+5)
+	jp nz,rdc_dirty_b
+	ld a,(ix+4)
+	cp (iy+6)
+	jp nz,rdc_dirty_b
+	ld a,(ix+5)
+	cp (iy+7)
+	jp nz,rdc_dirty_b
+	ld a,(ix+6)
+	cp (iy+8)
+	jp nz,rdc_dirty_b
+	ld a,(ix+7)
+	cp (iy+9)
+	jp nz,rdc_dirty_b
+rdc_clean_b:
+	xor a
+	jr rdc_store_b
+rdc_dirty_b:
+	ld b,1
+	ld a,1
+rdc_store_b:
+	push hl
+	push af
+	ld a,c
+	add a,celldirty & 255
+	ld l,a
+	ld h,celldirty/256
+	pop af
+	ld (hl),a
+	pop hl
+	inc hl
+	inc de
+	push de
+	ld de,10
+	add iy,de
+	ld de,8
+	add ix,de
+	pop de
+	inc c
+	ld a,c
+	cp 40
+	jp nz,rdc_loop_b
 	ld a,b
 	or a
 	ret
@@ -1635,19 +1687,23 @@ lmmm_tp:
 ; sprites
 ; ============================================================================
 sprites:
-	; back page = clean playfield (the V9990 copies while we go on)
-	ld hl,0
+	; back page = clean playfield (the V9990 copies while we go on).
+	; only the active 480x200 playfield needs copying: the border is
+	; filled once in render_first and never touched again, in either
+	; clean or display buffer, so re-copying it every frame is wasted
+	; V9990 bus time (sprites never reach outside the playfield either).
+	ld hl,SCREEN_X
 	ld (cmdblk+0),hl
 	ld (cmdblk+4),hl
-	ld hl,CLEAN_Y
+	ld hl,CLEAN_Y+SCREEN_Y
 	ld (cmdblk+2),hl
 	ld a,(page_back)
 	ld h,a
-	ld l,0
+	ld l,SCREEN_Y
 	ld (cmdblk+6),hl
-	ld hl,512
+	ld hl,480
 	ld (cmdblk+8),hl
-	ld hl,212
+	ld hl,200
 	ld (cmdblk+10),hl
 	call lmmm
 sp_erased:
@@ -2228,14 +2284,20 @@ spr_cols:
 	add hl,hl
 	ld de,$8000
 	add hl,de
+	; spr_tmp+11 bit 1 (x-expand) is constant for the whole sprite: test it
+	; once here instead of on every one of the 126 spr_nib calls below.
+	ld a,(spr_tmp+11)
+	bit 1,a
+	jr nz,spr_rows_x
+spr_rows_n:
 	ld b,21
-spr_row:
+spr_row_n:
 	push bc
 	push hl
-	; 3 bytes -> 18 output bytes in BUF (36 px), x-expanded: 36 bytes
+	; 3 bytes -> 18 output bytes in BUF (36 px)
 	ld ix,BUF
 	ld b,3
-spr_byte:
+spr_byte_n:
 	ld a,(hl)
 	inc hl
 	push hl
@@ -2244,11 +2306,11 @@ spr_byte:
 	rrca
 	rrca
 	rrca
-	call spr_nib
+	call spr_nib_n
 	ld a,c
-	call spr_nib
+	call spr_nib_n
 	pop hl
-	djnz spr_byte
+	djnz spr_byte_n
 	; send once (twice for y-expansion)
 	ld a,(spr_tmp+11)
 	bit 2,a
@@ -2258,7 +2320,41 @@ spr_byte:
 	ld de,3
 	add hl,de
 	pop bc
-	djnz spr_row
+	djnz spr_row_n
+	pop iy
+	ret
+spr_rows_x:
+	ld b,21
+spr_row_x:
+	push bc
+	push hl
+	; 3 bytes -> 36 output bytes in BUF (x-expanded)
+	ld ix,BUF
+	ld b,3
+spr_byte_x:
+	ld a,(hl)
+	inc hl
+	push hl
+	ld c,a
+	rrca
+	rrca
+	rrca
+	rrca
+	call spr_nib_x
+	ld a,c
+	call spr_nib_x
+	pop hl
+	djnz spr_byte_x
+	; send once (twice for y-expansion)
+	ld a,(spr_tmp+11)
+	bit 2,a
+	call nz,spr_send
+	call spr_send
+	pop hl
+	ld de,3
+	add hl,de
+	pop bc
+	djnz spr_row_x
 	pop iy
 	ret
 spr_send:
@@ -2269,17 +2365,14 @@ spr_send:
 	ld c,V_CMD
 	otir
 	ret
-; nibble A (low 4 bits) -> 3 bytes at IX (6 bytes if x-expanded)
-spr_nib:
+; nibble A (low 4 bits) -> 3 bytes at IX
+spr_nib_n:
 	and $0F
 	ld l,a
 	add a,a
 	add a,l
 	ld l,a
 	ld h,NT/256
-	ld a,(spr_tmp+11)
-	bit 1,a
-	jr nz,spr_nib_x
 	ld a,(hl)
 	ld (ix+0),a
 	inc l
@@ -2292,7 +2385,14 @@ spr_nib:
 	inc ix
 	inc ix
 	ret
+; nibble A (low 4 bits) -> 6 bytes at IX (x-expanded)
 spr_nib_x:
+	and $0F
+	ld l,a
+	add a,a
+	add a,l
+	ld l,a
+	ld h,NT/256
 	ld e,3
 snx_l:
 	ld a,(hl)

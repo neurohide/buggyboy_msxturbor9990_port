@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 tools/trace_samples.py /tmp/bb_test.samples)",
+      "Bash(python3 tools/profgroup.py /tmp/bb_test.samples)",
+      "Bash(cat)",
+      "Bash(test/run.sh 30 /tmp/fc_test /tmp/fc_test.tcl)",
+      "Bash(file /tmp/fc_play*.png)",
+      "Read(//tmp/**)",
+      "Read(//private/tmp/**)",
+      "Bash(test/run.sh 30 /tmp/fc_test2 ' *)",
+      "Bash(mkdir -p *)",
+      "Bash(test/run.sh 35 /tmp/bb_fps/run ' *)"
+    ],
+    "additionalDirectories": [
+      "/tmp",
+      "/private/tmp"
+    ]
+  }
+}

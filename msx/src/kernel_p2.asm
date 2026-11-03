@@ -25,6 +25,15 @@ ki_clr:
 	ld (hl),0
 	inc hl
 	djnz ki_clr
+	; 0 is a valid C64 colour (black): bank_live must start as "no colour
+	; written yet", not "colour 0 already written", or k_setlive would skip
+	; the V9990's genuinely-uninitialized palette entries for colour 0.
+	ld hl,bank_live
+	ld b,8
+ki_bl:
+	ld (hl),$FF
+	inc hl
+	djnz ki_bl
 	ld a,SEG_C2
 	ld (cur_p2),a
 	ld a,SEG_C3
@@ -944,6 +953,26 @@ iowr_vic:
 	jr z,iowr_d019
 	jr iowr_x
 iowr_vic_new:
+	; $D020-$D023 (live palette slots: border/bg0/bg1/bg2) are written far
+	; more often than the other special registers below (every raster-split
+	; colour change), so they're checked first here instead of after 6
+	; comparisons that almost always miss.
+	cp $20
+	jr c,ivn_rest
+	cp $24
+	jr nc,ivn_rest
+	; $D020-$D023: live palette slots (border -> 3, bg0..bg2 -> 0..2)
+	sub $20
+	jr nz,iowr_bg
+	ld a,PAL_BORDER+1
+iowr_bg:
+	dec a
+	pop hl                      ; H = value written
+	push hl
+	call k_setlive              ; slot A, colour H
+	pop af
+	ret
+ivn_rest:
 	cp $11
 	jr z,iowr_d011
 	cp $12
@@ -956,21 +985,7 @@ iowr_vic_new:
 	jr z,iowr_x
 	cp $1F
 	jr z,iowr_x
-	cp $20
-	jr c,iowr_changed
-	cp $24
-	jr nc,iowr_changed
-	; $D020-$D023: live palette slots (border -> 3, bg0..bg2 -> 0..2)
-	sub $20
-	jr nz,iowr_bg
-	ld a,PAL_BORDER+1
-iowr_bg:
-	dec a
-	pop hl                      ; H = value written
-	push hl
-	call k_setlive              ; slot A, colour H
-	pop af
-	ret
+	jr iowr_changed
 iowr_d011:
 	ld a,1
 	ld (vic_changed),a
@@ -1041,26 +1056,43 @@ k_setlive:
 	ld a,(pal_bank)
 	xor 1
 	ld (pal_bank),a
+	ld e,a                      ; e = new bank index (0/1)
 	rrca
 	rrca
 	ld c,a                      ; bank * 64: palette pointer of its slot 0
-	ld a,14
-	out (V_SEL),a
-	ld a,c
-	out (V_REG),a
+	; IX -> bank_live[bank*4]: colours this bank's VRAM palette already holds
+	ld a,e
+	add a,a
+	add a,a
+	ld d,0
+	ld e,a
+	ld ix,bank_live
+	add ix,de
+	ld d,c                      ; d = this slot's R#14 value, starts at bank*64
 	ld hl,palette_shadow
 	ld b,4
 ksl_slot:
 	ld a,(hl)
 	inc hl
 	push hl
+	cp (ix+0)
+	jr z,ksl_skip                ; this bank's VRAM already has this colour here
+	ld (ix+0),a
 	ld l,a
 	add a,a
 	add a,l
 	ld l,a
 	ld h,0
+	push de
 	ld de,c64_rgb
 	add hl,de
+	pop de
+	push hl
+	ld a,14
+	out (V_SEL),a
+	ld a,d
+	out (V_REG),a
+	pop hl
 	ld a,(hl)
 	out (V_PAL),a
 	inc hl
@@ -1069,6 +1101,11 @@ ksl_slot:
 	inc hl
 	ld a,(hl)
 	out (V_PAL),a
+ksl_skip:
+	ld a,d
+	add a,4                      ; R#14 is in units of entry*4
+	ld d,a
+	inc ix
 	pop hl
 	djnz ksl_slot
 	ld a,c
