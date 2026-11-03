@@ -1160,6 +1160,16 @@ sli_set:
 	xor a
 sli_set2:
 	ld (sli_bord),a
+	; the V9990 line register only changes when the armed line does
+	inc hl
+	push hl
+	ld de,(sli_last)
+	or a
+	sbc hl,de
+	pop hl
+	jr z,sli_di
+	ld (sli_last),hl
+	dec hl
 	call k_get_iff
 	push af
 	di
@@ -1329,6 +1339,8 @@ vi_clr2:
 	out (V_REG),a
 	ld a,h
 	out (V_REG),a
+	ld hl,0
+	ld (sli_last),hl
 	ld a,7
 	out (V_INT),a
 	ret
