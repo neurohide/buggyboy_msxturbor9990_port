@@ -1034,6 +1034,63 @@ iowr_changed:
 	pop af
 	ret
 
+; ---- fixed-address VIC register writes (translate.py IO_FAST) ----------------
+; A = value; preserves A, F, BC, DE.  Enter the general path with AF on the stack.
+iowf_D011:
+	push af
+	ld hl,VIC_REGS+$11
+	cp (hl)
+	jp z,iowr_x
+	ld (hl),a
+	ld a,$11
+	jp iowr_vic_new
+iowf_D012:
+	push af
+	ld hl,VIC_REGS+$12
+	cp (hl)
+	jp z,iowr_x
+	ld (hl),a
+	ld a,$12
+	jp iowr_vic_new
+iowf_D016:
+	push af
+	ld hl,VIC_REGS+$16
+	cp (hl)
+	jp z,iowr_x
+	ld (hl),a
+	ld a,$16
+	jp iowr_vic_new
+iowf_D019:
+	push af
+	ld hl,VIC_REGS+$19
+	cp (hl)
+	ld (hl),a
+	jp iowr_d019
+iowf_D021:
+	push af
+	ld hl,VIC_REGS+$21
+	cp (hl)
+	jp z,iowr_x
+	ld (hl),a
+	ld a,$21
+	jp iowr_vic_new
+iowf_D022:
+	push af
+	ld hl,VIC_REGS+$22
+	cp (hl)
+	jp z,iowr_x
+	ld (hl),a
+	ld a,$22
+	jp iowr_vic_new
+iowf_D023:
+	push af
+	ld hl,VIC_REGS+$23
+	cp (hl)
+	jp z,iowr_x
+	ld (hl),a
+	ld a,$23
+	jp iowr_vic_new
+
 ; set live palette slot A (0..3) to C64 colour H.  Preserves BC, DE.
 ; The live slots are written into the palette bank that is not on screen,
 ; then R#13/R#15 switch to it: the beam never sees a half-written colour
@@ -1074,9 +1131,17 @@ k_setlive:
 ksl_slot:
 	ld a,(hl)
 	inc hl
-	push hl
 	cp (ix+0)
-	jr z,ksl_skip                ; this bank's VRAM already has this colour here
+	jr nz,ksl_diff              ; (out of line: unchanged slots are the common case)
+ksl_skip:
+	ld a,d
+	add a,4                      ; R#14 is in units of entry*4
+	ld d,a
+	inc ix
+	djnz ksl_slot
+	jr ksl_done
+ksl_diff:
+	push hl
 	ld (ix+0),a
 	ld l,a
 	add a,a
@@ -1101,13 +1166,9 @@ ksl_slot:
 	inc hl
 	ld a,(hl)
 	out (V_PAL),a
-ksl_skip:
-	ld a,d
-	add a,4                      ; R#14 is in units of entry*4
-	ld d,a
-	inc ix
 	pop hl
-	djnz ksl_slot
+	jr ksl_skip
+ksl_done:
 	ld a,c
 	rrca
 	rrca
@@ -1160,6 +1221,16 @@ sli_set:
 	xor a
 sli_set2:
 	ld (sli_bord),a
+	; the V9990 line register only changes when the armed line does
+	inc hl
+	push hl
+	ld de,(sli_last)
+	or a
+	sbc hl,de
+	pop hl
+	jr z,sli_di
+	ld (sli_last),hl
+	dec hl
 	call k_get_iff
 	push af
 	di
@@ -1329,6 +1400,8 @@ vi_clr2:
 	out (V_REG),a
 	ld a,h
 	out (V_REG),a
+	ld hl,0
+	ld (sli_last),hl
 	ld a,7
 	out (V_INT),a
 	ret
@@ -1393,6 +1466,19 @@ ri4:
 	jr nz,ri5
 	res 4,b
 ri5:
+	; steering direction changed: the game only steers on the frame where its
+	; countdown LEED0 ($EED0) equals 1 (once per 8 frames).  Make that the next
+	; frame so a key press is felt at once; the 8-frame rhythm then restarts.
+	ld a,(joy_state)
+	xor b
+	and $0C
+	jr z,ri5b
+	ld a,($EED0)
+	cp 2
+	jr c,ri5b                   ; 0: not racing, 1: steering step is already next
+	ld a,1
+	ld ($EED0),a
+ri5b:
 	ld a,b
 	ld (joy_state),a
 	; C64 column 7: RUN/STOP (row 7) <- MSX STOP (row 7 bit 4);
@@ -1562,7 +1648,9 @@ m44_d:
 	pop bc
 	ret
 
-; HL = SID frequency -> HL = PSG tone period (1905600 / F, clamped to 12 bit)
+; HL = SID frequency -> HL = PSG tone period = 1905600 / F.  F >= 512 gives a
+; quotient < 4096, so 12 restoring-division steps suffice: remainder starts as
+; 1905600 >> 12 ($1D1 < F), dividend bits are the low 12 bits ($3C0) in DE.
 sid_period:
 	ld a,h
 	cp 2
@@ -1572,54 +1660,29 @@ sid_period:
 sdp_ok_range:
 	push bc
 	push de
-	ex de,hl                    ; DE = F
-	ld a,$1D                    ; A:HL = 1905600 = $1D13C0
-	ld hl,$13C0
-	bit 7,d
-	jr z,sdp_div
-	srl d                       ; keep the remainder within 16 bits
-	rr e
-	srl a                       ; dividend / 2
-	rr h
-	rr l
-sdp_div:
-	ld bc,0                     ; remainder
-	push af
-	ld a,24
-	ld (k_tmp+4),a
-	pop af
-sdp_l:
-	add hl,hl
-	rla
-	rl c
-	rl b
-	push hl
-	ld h,b
-	ld l,c
-	or a
-	sbc hl,de
-	jr c,sdp_no
 	ld b,h
-	ld c,l
-	pop hl
-	inc l                       ; quotient bit
-	jr sdp_nx
-sdp_no:
-	pop hl
-sdp_nx:
-	push hl
-	ld hl,k_tmp+4
-	dec (hl)
-	pop hl
+	ld c,l                      ; BC = F
+	ld hl,$01D1
+	ld de,$3C00
+	ld a,12
+sdp_l:
+	sla e
+	rl d
+	adc hl,hl
+	jr c,sdp_f
+	sbc hl,bc
+	jr nc,sdp_q
+	add hl,bc
+	jr sdp_d
+sdp_f:
+	or a
+	sbc hl,bc
+sdp_q:
+	inc e
+sdp_d:
+	dec a
 	jr nz,sdp_l
-	or a                        ; quotient in A:HL
-	jr nz,sdp_clamp
-	ld a,h
-	cp $10
-	jr c,sdp_done
-sdp_clamp:
-	ld hl,$0FFF
-sdp_done:
+	ex de,hl                    ; quotient
 	pop de
 	pop bc
 	ret

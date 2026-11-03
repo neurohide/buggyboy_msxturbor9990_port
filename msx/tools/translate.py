@@ -36,6 +36,7 @@ N, Z, C = 1, 2, 4
 ALL = N | Z | C
 
 SEG_CAPACITY = 0x3C00         # bytes of translated code per 16K segment
+IO_FAST = (0xD011, 0xD012, 0xD016, 0xD019, 0xD021, 0xD022, 0xD023)   # handlers: iowf_XXXX in kernel_p2.asm
 SEG_CODE_FIRST = 8            # mapper segment number of the first code segment
 
 # flags read (uses) / written (defs) per mnemonic
@@ -335,6 +336,8 @@ class Gen:
             return
         helper = {'vic': 'k_vwr', 'io': 'k_iowr', 'gen': 'k_gwr', 'genram': 'k_gwr_ram',
                   'vec': 'k_vecwr'}[cls]
+        if cls == 'io' and mode == 'abs' and v in IO_FAST:
+            helper, setup = 'iowf_%04X' % v, []   # fixed hot VIC register: no address decode
         if reg == 'a':
             self.emit(*setup)
             self.emit('call ' + helper)
@@ -575,16 +578,53 @@ def main():
             g.instr(a, 0)
         sizes.append((est_size(g.out), c))
     # far calls add a few bytes; keep a margin
-    bins = []
-    for size, c in sorted(sizes, key=lambda x: -x[0]):
-        size = int(size * 1.25) + 16
+    # call affinity: components that call each other should share a segment
+    # (a cross-segment call goes through k_farcall)
+    comp_of = {a: i for i, c in enumerate(comps) for a in c}
+    aff = {}
+    for a, d in tr.ins.items():
+        if d[1] == 'jsr' and d[3] in comp_of and a in comp_of:
+            x, y = comp_of[a], comp_of[d[3]]
+            if x != y:
+                aff[(x, y)] = aff.get((x, y), 0) + 1
+                aff[(y, x)] = aff.get((y, x), 0) + 1
+    order = sorted(range(len(comps)), key=lambda i: -sizes[i][0])
+    bins = []   # [size, [comps], {comp index}]
+    for i in order:
+        c = comps[i]
+        size = int(sizes[i][0] * 1.25) + 16
+        best = None
         for b in bins:
             if b[0] + size <= SEG_CAPACITY:
-                b[0] += size
-                b[1].append(c)
-                break
+                w = sum(aff.get((i, j), 0) for j in b[2])
+                if best is None or w > best[0]:
+                    best = (w, b)
+        if best is None:
+            bins.append([size, [c], {i}])
         else:
-            bins.append([size, [c]])
+            b = best[1]
+            b[0] += size
+            b[1].append(c)
+            b[2].add(i)
+    csize = {i: int(sizes[i][0] * 1.25) + 16 for i in range(len(comps))}
+    def gain(i, b):
+        return sum(aff.get((i, j), 0) for j in b[2] if j != i)
+    for _ in range(20):
+        moved = False
+        for i in range(len(comps)):
+            src = next(b for b in bins if i in b[2])
+            for b in bins:
+                if b is src or b[0] + csize[i] > SEG_CAPACITY:
+                    continue
+                if gain(i, b) > gain(i, src):
+                    src[0] -= csize[i]; src[2].discard(i); src[1].remove(comps[i])
+                    b[0] += csize[i]; b[2].add(i); b[1].append(comps[i])
+                    moved = True
+                    break
+        if not moved:
+            break
+    cross = sum(w for (x, y), w in aff.items() if x < y and not any(x in b[2] and y in b[2] for b in bins))
+    sys.stderr.write('static cross-segment call edges: %d (%d segments)\n' % (cross, len(bins)))
     for i, b in enumerate(bins):
         for c in b[1]:
             for a in c:

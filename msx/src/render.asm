@@ -24,8 +24,8 @@ VDW:             equ $7900           ; work copy of VDIRTY
 CHDIRTY:         equ $7A00           ; per character code
 SCACHE:          equ $7B00           ; sprite cache: 128 slots x 16 bytes ($7B00-$82FF!)
 RV:              equ $7F00           ; misc variables (overlaps nothing below $7F00)
-; SCACHE only uses 64 slots so that it stays below RV.
-SC_SLOTS:        equ 64
+; SCACHE: 128 slots x 8 bytes = $400, ends below RV.
+SC_SLOTS:        equ 128
 
 cdw:             equ RV+$00          ; 16
 row_full:        equ RV+$10          ; 25
@@ -55,6 +55,7 @@ rec_cur:         equ RV+$84          ; 2
 cmdblk:          equ RV+$86          ; 21: R#32..R#52
 spr_n:           equ RV+$9B          ; sprites drawn this frame
 spr_tmp:         equ RV+$D0          ; 32 scratch
+rdc_gf:          equ spr_tmp+20      ; rd_cells: group-changed flag (sprites are not drawn meanwhile)
 rgn_rec:         equ RV+$A5          ; 2 record of the sprite region
 rgn_lo:          equ RV+$A7          ; 2 first raster line of region
 rgn_hi:          equ RV+$A9          ; 2 first raster line after region
@@ -713,19 +714,25 @@ rd_cells:
 	; test it once here instead of on every rdc_loop/rdc_cand iteration below.
 	ld a,(row_mode)
 	bit 1,a
-	jr nz,rdc_loop_b
+	jp nz,rdc_loop_b
+	ld ix,celldirty             ; text mode never uses IX for bitmap data
 rdc_loop_t:
+	ld a,c
+	and 7
+	jr nz,rdc_ng                ; screen/colour-changed flag: once per 8 cells
 	push hl
 	ld a,c
 	rrca
 	rrca
 	rrca
-	and $1F
 	add a,rd_sgrp & 255
 	ld l,a
 	ld h,rd_sgrp/256
-	ld a,(hl)                   ; screen/colour changed in this group
+	ld a,(hl)
+	ld (rdc_gf),a
 	pop hl
+rdc_ng:
+	ld a,(rdc_gf)
 	or a
 	jr nz,rdc_cand_t
 	push hl
@@ -782,22 +789,13 @@ rdc_dirty_t:
 	ld b,1
 	ld a,1
 rdc_store_t:
-	push hl
-	push af
-	ld a,c
-	add a,celldirty & 255
-	ld l,a
-	ld h,celldirty/256
-	pop af
-	ld (hl),a
-	pop hl
+	ld (ix+0),a
+	inc ix
 	inc hl
 	inc de
 	push de
 	ld de,10
 	add iy,de
-	ld de,8
-	add ix,de
 	pop de
 	inc c
 	ld a,c
@@ -1226,7 +1224,14 @@ dr_cell:
 dr_send:
 	ld b,d
 	ld c,V_CMD
-	otir
+dr_s6:
+	outi                        ; 6 bytes (one cell) per pass: stride is a multiple of 6
+	outi
+	outi
+	outi
+	outi
+	outi
+	jr nz,dr_s6
 	dec e
 	jr nz,dr_send
 	jp csel_fix
@@ -2342,31 +2347,22 @@ spc_h:
 	add a,b
 	and SC_SLOTS-1
 	ld (spr_tmp+15),a
-	; compare key
-	ld l,a
-	ld h,0
-	add hl,hl
-	add hl,hl
-	add hl,hl
-	ld de,SCACHE
-	add hl,de
-	push hl
-	ld de,spr_tmp+10
-	ld b,5
-spc_cmp:
-	ld a,(de)
-	cp (hl)
-	jr nz,spc_miss
-	inc hl
-	inc de
-	djnz spc_cmp
-	ld a,(hl)                   ; valid flag
-	or a
-	jr z,spc_miss
-	pop hl
-	jr spc_pos
-spc_miss:
-	pop hl
+	; 2-way: try slot, then slot^1; on miss evict a random one of the pair
+	call spc_chk
+	jr c,spc_pos
+	ld a,(spr_tmp+15)
+	xor 1
+	ld (spr_tmp+15),a
+	call spc_chk
+	jr c,spc_pos
+	ld a,r
+	and 1
+	ld b,a
+	ld a,(spr_tmp+15)
+	and $FE
+	or b
+	ld (spr_tmp+15),a
+	call spc_ent
 	ex de,hl
 	ld hl,spr_tmp+10
 	ld bc,5
@@ -2422,6 +2418,38 @@ spc_dd:
 	add hl,de
 	ld (spr_tmp+8),hl
 	pop hl
+	or a
+	ret
+
+; A = slot -> HL = SCACHE entry
+spc_ent:
+	ld l,a
+	ld h,0
+	add hl,hl
+	add hl,hl
+	add hl,hl
+	ld de,SCACHE
+	add hl,de
+	ret
+; CF=1 if slot (spr_tmp+15) holds key spr_tmp+10..14
+spc_chk:
+	ld a,(spr_tmp+15)
+	call spc_ent
+	ld de,spr_tmp+10
+	ld b,5
+spc_cmp:
+	ld a,(de)
+	cp (hl)
+	jr nz,spc_no
+	inc hl
+	inc de
+	djnz spc_cmp
+	ld a,(hl)
+	or a
+	ret z
+	scf
+	ret
+spc_no:
 	or a
 	ret
 
@@ -2482,7 +2510,97 @@ spr_cols:
 	; once here instead of on every one of the 126 spr_nib calls below.
 	ld a,(spr_tmp+11)
 	bit 1,a
-	jr nz,spr_rows_x
+	jp nz,spr_rows_x
+	; no y-expansion: stream straight from the nibble table to the VDP
+	; (the common case); y-expanded shapes need the row twice -> BUF path
+	ld a,(spr_tmp+11)
+	bit 2,a
+	jp nz,spr_rows_n
+	push hl
+	pop ix
+	ld a,21
+	ld (spr_tmp+16),a
+	ld c,V_CMD
+	ld h,NT/256
+spr_dr:
+	ld a,(ix+0)
+	inc ix
+	ld d,a
+	rrca
+	rrca
+	rrca
+	rrca
+	and $0F
+	ld l,a
+	add a,a
+	add a,l
+	ld l,a
+	outi
+	outi
+	outi
+	ld a,d
+	and $0F
+	ld l,a
+	add a,a
+	add a,l
+	ld l,a
+	outi
+	outi
+	outi
+	ld a,(ix+0)
+	inc ix
+	ld d,a
+	rrca
+	rrca
+	rrca
+	rrca
+	and $0F
+	ld l,a
+	add a,a
+	add a,l
+	ld l,a
+	outi
+	outi
+	outi
+	ld a,d
+	and $0F
+	ld l,a
+	add a,a
+	add a,l
+	ld l,a
+	outi
+	outi
+	outi
+	ld a,(ix+0)
+	inc ix
+	ld d,a
+	rrca
+	rrca
+	rrca
+	rrca
+	and $0F
+	ld l,a
+	add a,a
+	add a,l
+	ld l,a
+	outi
+	outi
+	outi
+	ld a,d
+	and $0F
+	ld l,a
+	add a,a
+	add a,l
+	ld l,a
+	outi
+	outi
+	outi
+	ld a,(spr_tmp+16)
+	dec a
+	ld (spr_tmp+16),a
+	jp nz,spr_dr
+	pop iy
+	ret
 spr_rows_n:
 	ld b,21
 spr_row_n:

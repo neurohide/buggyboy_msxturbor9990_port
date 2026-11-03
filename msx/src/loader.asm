@@ -25,13 +25,6 @@ loader_start:
 	defs 6,0
 
 ld_init:
-	; the intro runs first, until a key press, on the Z80 and the MSX VDP; it swaps page 1, so
-	; the call goes through a stub in RAM
-	ld hl,ld_istub
-	ld de,INTRO_STUB
-	ld bc,ld_istub_end-ld_istub
-	ldir
-	call INTRO_STUB
 	; R800 ROM mode (keeps all mapper RAM for us)
 	ld a,$81
 	call CHGCPU
@@ -171,16 +164,6 @@ ld_t_nosub:
 	out (PORT_P1),a
 	jp k_init
 ld_tramp_end:
-
-; copied to INTRO_STUB and run from there (page 3 RAM)
-ld_istub:
-	ld a,INTRO_BANK
-	ld (ASCII16_P1),a
-	call INTRO_ENTRY
-	xor a
-	ld (ASCII16_P1),a
-	ret
-ld_istub_end:
 
 ; ROM bank, mapper segment
 ld_table:

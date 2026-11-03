@@ -93,6 +93,7 @@ sli_bord:        equ KVARS+$C6       ; the armed raster line is the border slot
 pal_bank:        equ KVARS+$C7       ; palette bank on screen (0/1, R#13 offset)
 raster_base:     equ KVARS+$C8       ; 2: C64 line at the last raster clock restart
 bank_live:       equ KVARS+$CA       ; 8: live colours last written into V9990 palette bank 0/1 ($FF = unknown)
+sli_last:        equ KVARS+$D2       ; 2: line+1 last written to V9990 R#10 (0 = unknown)
 
 ; timeline: two buffers of TL_MAX records of 64 bytes (in two separate holes)
 TIMELINE:        equ $3100
