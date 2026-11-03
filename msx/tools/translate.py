@@ -55,6 +55,28 @@ ESCAPE_JUMPS = {0x1329}
 BRANCH_COND = {'beq': 'z', 'bne': 'nz', 'bmi': 'm', 'bpl': 'p'}
 SMC_OPERAND = set()           # instruction addresses whose operand is patched at runtime
 
+# VIC registers with dedicated kernel write handlers, reachable directly via
+# a *_fast kernel entry (see kernel_p2.asm) when the store's target address
+# is a compile-time constant -- bypasses k_iowr's generic region+register
+# dispatch chain entirely. Keyed by register number (address & $3F).
+VIC_FAST_WR = {
+    0x11: 'iowr_d011_fast', 0x12: 'iowr_d012_fast',
+    0x19: 'iowr_d019_fast', 0x1A: 'iowr_d01a_fast',
+    0x20: 'iowr_d020_fast', 0x21: 'iowr_d021_fast',
+    0x22: 'iowr_d022_fast', 0x23: 'iowr_d023_fast',
+    0x25: 'iowr_d025_fast', 0x26: 'iowr_d026_fast',
+    0x27: 'iowr_d027_fast', 0x28: 'iowr_d028_fast',
+    0x0C: 'iowr_d00c_fast', 0x0D: 'iowr_d00d_fast',
+    0x0E: 'iowr_d00e_fast', 0x0F: 'iowr_d00f_fast',
+    0x10: 'iowr_d010_fast', 0x1D: 'iowr_d01d_fast',
+    0x16: 'iowr_d016_fast', 0x18: 'iowr_d018_fast',
+    0x17: 'iowr_d017_fast',
+    # NOTE: 0x15 (sprite enable) and 0x1C (sprite multicolor select) are
+    # deliberately NOT mapped here. Fast-pathing them causes confirmed
+    # sprite-rendering corruption (isolated via bisection); root cause not
+    # found. They stay on the generic k_iowr path.
+}
+
 
 def addr_class(a, ramio=False):
     """Classify a C64 address for direct (static) access."""
@@ -333,6 +355,22 @@ class Gen:
             self.emit(*setup)
             self.emit('ld (hl),%s' % reg)
             return
+        # Fast path: for a compile-time-known address (abs/zp, not an SMC
+        # operand) hitting one of the 8 VIC registers with dedicated kernel
+        # handlers, skip the generic k_iowr region+register dispatch chain
+        # (it has to re-derive at runtime what we already know statically)
+        # and call straight into the matching *_fast entry. These registers
+        # are written far more often than the rest of $D000-$D3FF combined
+        # (the road-gradient raster effect alone fires $D011/$D012/$D019/
+        # $D020-$D023 many times per frame), so this is worth specialising.
+        if mode in ('abs', 'zp') and cls == 'io' and 0xD000 <= v <= 0xD3FF:
+            fast = VIC_FAST_WR.get(v & 0x3F)
+            if fast:
+                if reg == 'a':
+                    self.emit('call ' + fast)
+                else:
+                    self.emit('push af', 'ld a,%s' % reg, 'call ' + fast, 'pop hl', 'ld a,h')
+                return
         helper = {'vic': 'k_vwr', 'io': 'k_iowr', 'gen': 'k_gwr', 'genram': 'k_gwr_ram',
                   'vec': 'k_vecwr'}[cls]
         if reg == 'a':
