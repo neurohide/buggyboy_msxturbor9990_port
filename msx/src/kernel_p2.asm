@@ -104,18 +104,23 @@ kad2:
 ; ============================================================================
 k_farcall:
 	ex af,af'
-	pop ix                      ; -> parameters
-	ld l,(ix+1)
-	ld h,(ix+2)
-	inc ix
-	inc ix
-	inc ix
-	push ix                     ; caller's return address
+	pop hl                      ; -> parameters
+	inc hl
+	inc hl
+	inc hl
+	push hl                     ; caller's return address
 	ld a,(cur_p1)
 	push af                     ; caller's segment
-	ld a,(ix-3)
-	ld ix,fc_epilogue
-	push ix
+	push de
+	dec hl
+	ld d,(hl)
+	dec hl
+	ld e,(hl)                   ; DE = target
+	dec hl
+	ld a,(hl)                   ; A = segment
+	ld hl,fc_epilogue
+	ex (sp),hl                  ; epilogue on the stack, HL = caller's DE
+	ex de,hl
 	ld (cur_p1),a
 	out (PORT_P1),a
 	ex af,af'
@@ -351,15 +356,18 @@ ih_anchor:
 	ld (irq_line+1),a
 ih_again:
 	call tl_mark_irq
+	ld a,1
+	ld (in_irq),a
+	call irq_native
+	jr z,ih_nat
 	ld bc,0
 	ld de,0
 	ld a,($FFFE)
 	ld l,a
 	ld a,(vec_ffff)
 	ld h,a
-	ld a,1
-	ld (in_irq),a
 	call k_callc64
+ih_nat:
 	xor a
 	ld (in_irq),a
 	call tl_snapshot
@@ -394,6 +402,16 @@ ih_late:
 int_vblank:
 	ld a,1
 	out (V_INT),a
+	; a kerb band chain still running missed a line: drop it (vbl_catchup
+	; runs the band-12 handler, its line is the armed C64 one)
+	ld hl,kb_n
+	ld a,(hl)
+	or a
+	jr z,ivb_nokb
+	ld (hl),0
+	ld hl,0
+	ld (sli_last),hl
+ivb_nokb:
 	; show the page the renderer finished
 	ld a,(flip_pending)
 	or a
@@ -460,6 +478,35 @@ ivb_swap:
 	call tl_clear_irq
 	call tl_base_snapshot
 	call vbl_border
+	; The game's main loop only gets the CPU the renderer leaves free (it fell
+	; to ~2 iterations/s while the renderer ran at every vblank).  Render only
+	; once the main code has reached a frame sync (polled the raster) since the
+	; last render, or after 4 vblanks without one, or while a new screen is
+	; being built (calm_flips = $FF).
+	ld a,(mt_sync)
+	or a
+	jr nz,ivb_go
+	ld a,(calm_flips)
+	inc a
+	jr z,ivb_go
+	ld b,1                      ; vblanks to skip without a sync
+	ld hl,mt_head
+	ld a,(hl)
+	or a
+	jr z,ivb_skip
+	dec (hl)                    ; race loop: wait for its pass (fallback 12)
+	ld b,12
+ivb_skip:
+	ld hl,skip_n
+	ld a,(hl)
+	cp b
+	jr nc,ivb_go
+	inc (hl)
+	ret
+ivb_go:
+	xor a
+	ld (skip_n),a
+	ld (mt_sync),a
 	ld a,1
 	ld (rendering),a
 	ei
@@ -753,6 +800,7 @@ iord_ff:
 	pop af
 	ret
 iord_d011:
+	call mt_poll
 	call get_raster
 	ld a,h
 	rrca
@@ -765,6 +813,7 @@ iord_d011:
 	pop af
 	ret
 iord_d012:
+	call mt_poll
 	call get_raster
 	pop af
 	ret
@@ -1091,6 +1140,30 @@ iowf_D023:
 	ld a,$23
 	jp iowr_vic_new
 
+; VIC-bank load from translated code (HL = $4000-$7FFF -> L, AF, BC, DE kept):
+; maps the VIC bank into page 3 like the lazy stores (translate.py plan_vic_lazy)
+k_vrdl:
+	push af
+	ld a,(cur_p3)
+	cp SEG_VIC
+	jr z,vrdl_m
+	ld a,SEG_VIC
+	ld (cur_p3),a
+	out (PORT_P3),a
+vrdl_m:
+	set 7,h
+	set 6,h
+	ld a,h
+	and l
+	inc a
+	jr z,vrdl_ff                ; Z80 $FFFF is the sub-slot register
+	ld l,(hl)
+	pop af
+	ret
+vrdl_ff:
+	ld hl,$7FFF
+	jp k_vrd1                   ; (AF still pushed)
+
 ; set live palette slot A (0..3) to C64 colour H.  Preserves BC, DE.
 ; The live slots are written into the palette bank that is not on screen,
 ; then R#13/R#15 switch to it: the beam never sees a half-written colour
@@ -1102,10 +1175,10 @@ k_setlive:
 	ld a,h
 	and $0F
 	ld b,a
-	ld hl,palette_shadow
-	ld a,l
+	ld a,palette_shadow & 255
 	add a,c
 	ld l,a
+	ld h,palette_shadow/256
 	ld (hl),b
 	call k_get_iff
 	push af
@@ -1113,77 +1186,69 @@ k_setlive:
 	ld a,(pal_bank)
 	xor 1
 	ld (pal_bank),a
-	ld e,a                      ; e = new bank index (0/1)
+	ld b,a                      ; b = new bank index (0/1)
 	rrca
 	rrca
 	ld c,a                      ; bank * 64: palette pointer of its slot 0
-	; IX -> bank_live[bank*4]: colours this bank's VRAM palette already holds
-	ld a,e
+	; DE -> bank_live[bank*4]: colours this bank's VRAM palette already holds
+	; (bank_live and palette_shadow share the KVARS page)
+	ld a,b
 	add a,a
 	add a,a
-	ld d,0
+	add a,bank_live & 255
 	ld e,a
-	ld ix,bank_live
-	add ix,de
-	ld d,c                      ; d = this slot's R#14 value, starts at bank*64
+	ld d,bank_live/256
 	ld hl,palette_shadow
 	ld b,4
+	call ksl_slot
+	jr ksl_done
+
+; HL = palette_shadow, DE -> bank_live of bank C/64, B = 4: write the slots
+; that bank lacks
 ksl_slot:
-	ld a,(hl)
-	inc hl
-	cp (ix+0)
+	ld a,(de)
+	cp (hl)
 	jr nz,ksl_diff              ; (out of line: unchanged slots are the common case)
 ksl_skip:
-	ld a,d
-	add a,4                      ; R#14 is in units of entry*4
-	ld d,a
-	inc ix
+	inc hl
+	inc de
 	djnz ksl_slot
-	jr ksl_done
+	ret
 ksl_diff:
+	ld a,(hl)
+	ld (de),a
+	ld a,14
+	out (V_SEL),a
+	ld a,l
+	sub palette_shadow & 255
+	add a,a
+	add a,a                     ; R#14 is in units of entry*4
+	add a,c
+	out (V_REG),a
 	push hl
-	ld (ix+0),a
+	push de
+	ld a,(hl)
 	ld l,a
 	add a,a
 	add a,l
 	ld l,a
 	ld h,0
-	push de
 	ld de,c64_rgb
 	add hl,de
+	ld a,(hl)
+	out (V_PAL),a
+	inc hl
+	ld a,(hl)
+	out (V_PAL),a
+	inc hl
+	ld a,(hl)
+	out (V_PAL),a
 	pop de
-	push hl
-	ld a,14
-	out (V_SEL),a
-	ld a,d
-	out (V_REG),a
-	pop hl
-	ld a,(hl)
-	out (V_PAL),a
-	inc hl
-	ld a,(hl)
-	out (V_PAL),a
-	inc hl
-	ld a,(hl)
-	out (V_PAL),a
 	pop hl
 	jr ksl_skip
 ksl_done:
-	ld a,c
-	rrca
-	rrca
-	ld c,a                      ; bank * 16
-	ld a,13
-	out (V_SEL),a
-	ld a,c
-	rrca
-	rrca
-	out (V_REG),a               ; PLTO5-4: bank
-	ld a,15
-	out (V_SEL),a
-	ld a,c
-	or PAL_BORDER
-	out (V_REG),a               ; backdrop follows the bank
+	ld a,(pal_bank)
+	call pal_show
 	pop af
 	or a
 	jp z,ksl_di
@@ -1191,6 +1256,148 @@ ksl_done:
 ksl_di:
 	pop de
 	pop bc
+	ret
+
+; ---- kerb bands ($10E3 chain, see irq_native) ------------------------------
+; The C64 handler changes D021 at 13 raster lines per frame.  From the first
+; band on, the rest is done here: one list per frame, and each line IRQ only
+; sets the colour and arms the next line (k_int_kb, no C64 context).  The C64
+; state is left as after band 11 ($49 = 12, D012 = band 12's line), so the
+; band-12 handler runs as before.
+; E = first band to chain (1..11), D = 0; IRQ context.  Returns Z.
+kb_start:
+	ld a,12
+	sub e
+	ld (kb_n),a
+	ld b,a
+	ld hl,kb_list
+	ld (kb_ptr),hl
+kbs_l:
+	push hl
+	ld hl,$14A6
+	add hl,de
+	ld a,(hl)
+	ld hl,$14B3
+	add hl,de
+	ld c,(hl)
+	pop hl
+	ld (hl),a
+	inc hl
+	ld (hl),c
+	inc hl
+	inc e
+	djnz kbs_l
+	ld a,($14A6+12)
+	ld (hl),a
+	ld a,12
+	ld ($0049),a
+	ld a,($14A6+12)
+	call iowf_D012
+	ld ($004A),a
+	ld a,1
+	call iowf_D019
+	ld hl,0
+	ld (sli_last),hl
+	xor a
+	ld (irq_late),a
+	ld (sli_bord),a
+	; the bank not on screen: live palette with the first chained colour
+	; (the bands alternate two colours: from here on each one is a flip)
+	ld a,(palette_shadow)
+	push af
+	ld a,(kb_list+1)
+	and $0F
+	ld (palette_shadow),a
+	ld a,(pal_bank)
+	xor 1
+	ld b,a
+	rrca
+	rrca
+	ld c,a                      ; bank * 64
+	ld a,b
+	add a,a
+	add a,a
+	add a,bank_live & 255
+	ld e,a
+	ld d,bank_live/256
+	ld hl,palette_shadow
+	ld b,4
+	call ksl_slot
+	pop af
+	ld (palette_shadow),a
+	or 1
+	call kb_due
+	xor a
+	ret
+
+; B = 0 served; B = 1 not a lone line IRQ (normal path)
+kb_fast:
+	ld b,1
+	in a,(V_INT)
+	and 3
+	cp 2
+	ret nz
+	ld b,0
+	ld a,2
+	out (V_INT),a
+kb_apply:                       ; the entry at kb_ptr is due: its colour now
+	ld hl,(kb_ptr)
+	inc hl
+	ld a,(hl)
+	inc hl
+	ld (kb_ptr),hl
+	ld (VIC_REGS+$21),a
+	and $0F
+	ld c,a
+	ld a,(pal_bank)
+	xor 1
+	ld e,a
+	add a,a
+	add a,a
+	add a,bank_live & 255
+	ld l,a
+	ld h,bank_live/256
+	ld a,(hl)
+	cp c
+	jr nz,kb_slow
+	ld a,c                      ; the other bank holds it (kb_start): flip
+	ld (palette_shadow),a
+	ld a,e
+	ld (pal_bank),a
+	call pal_show
+	jr kb_dec
+kb_slow:
+	ld h,c
+	xor a
+	call k_setlive
+kb_dec:
+	ld hl,kb_n
+	dec (hl)
+kb_due:                         ; Z: the next line is band 12's (C64 handler)
+	ld hl,(kb_ptr)
+	ld e,(hl)
+	ld d,0
+	jr z,kb_arm
+	call get_raster
+	inc hl
+	or a
+	sbc hl,de
+	jr nc,kb_apply              ; the beam is there already
+kb_arm:
+	ld a,10
+	out (V_SEL),a
+	ld a,e
+	sub RASTER_OFS
+	out (V_REG),a
+	ld l,a
+	xor a
+	out (V_REG),a
+	ld h,a
+	ld a,(kb_n)
+	or a
+	ret nz
+	inc hl
+	ld (sli_last),hl            ; as set_line_irq leaves it
 	ret
 
 ; program the V9990 line interrupt from the C64 raster compare value
@@ -1263,9 +1470,10 @@ sli_vis:
 	ld d,a
 	ld a,(VIC_REGS+$12)
 	ld e,a
-	dec de                      ; a line counts as passed while the beam is on it
-	or a
-	sbc hl,de                   ; current - (compare - 1)
+	dec de                      ; a line counts as passed while the beam is on it,
+	dec de                      ; and the next one too: the timer estimate of the
+	or a                        ; beam can lag the V9990 line counter (arming one
+	sbc hl,de                   ; line ahead missed the IRQ): current - (compare - 2)
 	jr c,sli_ok
 	ld a,h
 	or a
@@ -1410,6 +1618,7 @@ v_init_regs:
 	db 7, $08                   ; PAL, non interlaced
 	db 8, $C2                   ; display on, cursor off
 	db 9, $03                   ; line + vblank interrupts
+	db 46, $FF, 47, $FF          ; command write mask: all bits (render never changes it)
 	db 13, $00                  ; palette mode, offset 0
 	db 15, PAL_BORDER           ; backdrop
 	db 16, $00

@@ -22,9 +22,8 @@ NT:              equ $7000           ; nibble table: 16 x 3 bytes
 BUF:             equ $7100           ; cell pixels, line-major, up to 40 cells
 VDW:             equ $7900           ; work copy of VDIRTY
 CHDIRTY:         equ $7A00           ; per character code
-SCACHE:          equ $7B00           ; sprite cache: 128 slots x 16 bytes ($7B00-$82FF!)
+SCACHE:          equ $5800           ; sprite cache: 128 slots x 8 bytes ($5800-$5BFF, above the code)
 RV:              equ $7F00           ; misc variables (overlaps nothing below $7F00)
-; SCACHE: 128 slots x 8 bytes = $400, ends below RV.
 SC_SLOTS:        equ 128
 
 cdw:             equ RV+$00          ; 16
@@ -54,12 +53,22 @@ tl_left:         equ RV+$83          ; events left
 rec_cur:         equ RV+$84          ; 2
 cmdblk:          equ RV+$86          ; 21: R#32..R#52
 spr_n:           equ RV+$9B          ; sprites drawn this frame
+row_edge:        equ RV+$9C          ; row was shifted in 38-col mode: redraw edge cells
+dr_full:         equ RV+$9D          ; draw_run: next LMMC needs the full command
+pf_n:            equ RV+$9E          ; draw_run: pending one-colour cells (merged LMMV)
+pf_col:          equ RV+$9F          ;   their colour byte
+pf_dx:           equ RV+$A0          ; 2 their first x
 spr_tmp:         equ RV+$D0          ; 32 scratch
 rdc_gf:          equ spr_tmp+20      ; rd_cells: group-changed flag (sprites are not drawn meanwhile)
+rdc_bg:          equ spr_tmp+21      ; rd_cells: bitmap dirty bits of the group, shifted per cell
+row_cram:        equ RV+$A2          ; 2: COLOR_RAM + r*40 (row_setup)
+row_shad:        equ RV+$AD          ; 2: SHADOW + r*400 (row_setup)
 rgn_rec:         equ RV+$A5          ; 2 record of the sprite region
 rgn_lo:          equ RV+$A7          ; 2 first raster line of region
 rgn_hi:          equ RV+$A9          ; 2 first raster line after region
 coll_acc:        equ RV+$AB
+ntq:             equ RV+$B0          ; 8: nt_build, 4 x (colour, colour * $11)
+fslot:           equ RV+$B8          ; 16: fix_slot cache, C64 colour -> slot (0 = not yet)
 rgn_idx:         equ RV+$AC
 dbg_cells:       equ RV+$F0          ; 2: cells drawn last frame
 dbg_full:        equ RV+$F2          ; rows fully redrawn last frame
@@ -89,6 +98,13 @@ SH_ROWP:         equ SH_ROWS+32      ; 25 flags: clean rows changed last frame
 SH_PG:           equ $F140           ; [0..1] sprites drawn per page, [2..3] page built
 SH_CUR_PG:       equ SH_PG+4         ; page being synced
 SH_EARLY:        equ SH_CUR_PG+1     ; 1: rows were synced to the back page during this render
+SH_XOFF:         equ $F150           ; last rendered horizontal offset for each row
+; changed x span of each clean row, 4-pixel units from SCREEN_X, [lo, hi)
+SPAN_LO:         equ $F180           ; this frame (valid where SH_ROWS is set)
+SPAN_HI:         equ $F1A0
+SPANP_LO:        equ $F1C0           ; last frame (valid where SH_ROWP is set)
+SPANP_HI:        equ $F1E0
+SPAN_FULL:       equ 120             ; 480 / 4
 
 render:
 	call k_map_vic
@@ -121,6 +137,27 @@ r_clr2:
 	inc hl
 	djnz r_clr2
 	ei
+	; sprite shapes the game rewrote (one 64-byte chunk per pointer): drop
+	; their cached copies so they are rendered again
+	ld hl,SCACHE
+	ld b,SC_SLOTS
+	ld d,VDW/256
+r_sci:
+	ld e,(hl)                   ; key byte 0 = pointer
+	ld a,(de)
+	or a
+	jr z,r_sci_n
+	push hl
+	ld de,5
+	add hl,de
+	ld (hl),0                   ; valid flag
+	pop hl
+	ld d,VDW/256
+r_sci_n:
+	ld de,8
+	add hl,de
+	ld d,VDW/256
+	djnz r_sci
 	ld a,$FF
 	ld (chd_cb),a
 	xor a
@@ -173,6 +210,11 @@ rr_next:
 render_first:
 	ld a,1
 	ld (first_done),a
+	ld hl,SH_XOFF
+	ld (hl),$FF
+	ld de,SH_XOFF+1
+	ld bc,24
+	ldir
 	ld hl,row_full
 	ld b,25
 rf1:
@@ -381,7 +423,7 @@ row_setup:
 	add hl,de                   ; -> VIC regs
 	push hl
 	pop ix
-	; signature check: D011&$70, D016&$1F, D018
+	; signature check: D011&$70, D016&$18, D018 (xscroll is handled below)
 	ld a,(cur_row)
 	ld l,a
 	ld h,0
@@ -393,7 +435,7 @@ row_setup:
 	and $70
 	ld b,a
 	ld a,(ix+$16)
-	and $1F
+	and $18
 	ld c,a
 	ld d,(ix+$18)
 	ld a,(hl)
@@ -456,6 +498,34 @@ rs_den:
 	add a,b
 	srl a
 	ld (row_xoff),a
+	; A changed horizontal offset moves every pixel in the row (the road
+	; curves this way): shift the drawn row in VRAM instead of redrawing it.
+	; Cells whose bytes changed are still found by row_dirty.
+	ld a,(cur_row)
+	ld e,a
+	ld d,0
+	ld hl,SH_XOFF
+	add hl,de
+	ld a,(row_xoff)
+	cp (hl)
+	jr z,rs_xsame
+	ld b,(hl)                   ; old offset
+	ld (hl),a
+	ld hl,row_full
+	add hl,de
+	ld a,b
+	inc a
+	jr z,rs_xfull               ; never drawn
+	ld a,(row_mode)
+	bit 2,a
+	jr nz,rs_xfull              ; blank row
+	ld a,(hl)
+	or a
+	call z,row_shift            ; not redrawn anyway: move it
+	jr rs_xsame
+rs_xfull:
+	ld (hl),1
+rs_xsame:
 	; screen row: bank offset (D018>>4)*$400 + r*40
 	ld a,(cur_row)
 	ld l,a
@@ -466,6 +536,21 @@ rs_den:
 	ld e,(hl)
 	inc hl
 	ld d,(hl)                   ; r*40
+	; per-row bases for cell_colours / shadow_ptr
+	ld hl,COLOR_RAM
+	add hl,de
+	ld (row_cram),hl
+	ld h,d
+	ld l,e
+	add hl,hl
+	add hl,hl
+	add hl,de
+	add hl,hl                   ; r*400
+	push de
+	ld de,SHADOW
+	add hl,de
+	pop de
+	ld (row_shad),hl
 	ld a,(ix+$18)
 	and $F0
 	rrca
@@ -517,6 +602,56 @@ rs_bitmap:
 	ld (row_data),hl
 	ret
 
+; move the current clean row from x offset B to row_xoff with one LMMM
+; (right moves copy from the right edge, DIX=1, so the overlap is safe)
+row_shift:
+	push ix
+	ld a,(cur_row)
+	call row_y_clean            ; also marks the row for the page sync
+	ld (cmdblk+2),hl
+	ld (cmdblk+6),hl
+	ld hl,480
+	ld (cmdblk+8),hl
+	ld hl,8
+	ld (cmdblk+10),hl
+	ld a,(row_xoff)
+	ld c,a
+	ld hl,SCREEN_X
+	cp b
+	ld a,0
+	jr c,rsh_dir                ; moving left: copy forwards
+	ld hl,SCREEN_X+479
+	ld a,4
+rsh_dir:
+	ld (cmdblk+12),a            ; ARG
+	push hl
+	ld e,b
+	ld d,0
+	add hl,de
+	ld (cmdblk+0),hl            ; SX
+	pop hl
+	ld e,c
+	add hl,de
+	ld (cmdblk+4),hl            ; DX
+	ld a,$0C
+	ld (cmdblk+13),a
+	ld a,$FF
+	ld (cmdblk+14),a
+	ld (cmdblk+15),a
+	ld a,$40                    ; LMMM
+	ld (cmdblk+20),a
+	call v_send_cmd
+	; 38 columns: the edge border moved with the row and the cells it
+	; covered were never drawn: redraw them (draw_run re-borders)
+	ld a,(row_csel)
+	or a
+	jr nz,rsh_done
+	inc a
+	ld (row_edge),a
+rsh_done:
+	pop ix
+	ret
+
 ; character dirty flags for the current charset (computed once per base)
 chd_prepare:
 	ld a,(row_bmoff+1)
@@ -539,9 +674,15 @@ chp_l:
 	inc l
 	ld c,a
 	or a
-	jr z,chp_fill
+	jr nz,chp_bits
+	ld b,8                      ; clean chunk (the common case): 8 zero flags
+chp_z:
+	ld (de),a
+	inc e                       ; CHDIRTY is page aligned
+	djnz chp_z
+	jr chp_next
+chp_bits:
 	ld (any_chd),a
-chp_fill:
 	ld b,8
 chp_8:
 	srl c
@@ -550,6 +691,7 @@ chp_8:
 	ld (de),a
 	inc de
 	djnz chp_8
+chp_next:
 	ld a,(rgn_idx)
 	dec a
 	ld (rgn_idx),a
@@ -580,6 +722,26 @@ rd_all:
 	or 1
 	ret
 rd_check:
+	ld a,(row_edge)
+	or a
+	jr z,rd_check2
+	xor a
+	ld (row_edge),a
+	ld hl,celldirty
+	ld b,40
+rd_clr:
+	ld (hl),a
+	inc hl
+	djnz rd_clr
+	call rd_check2              ; rewrites celldirty only if it compares cells
+	ld a,1
+	ld (celldirty+0),a
+	ld (celldirty+1),a
+	ld (celldirty+38),a
+	ld (celldirty+39),a
+	or a                        ; NZ
+	ret
+rd_check2:
 	; colour RAM chunk index = (r*40+c)>>6, screen chunk = (scroff+c)>>6
 	ld a,(row_mode)
 	bit 2,a
@@ -731,6 +893,13 @@ rdc_loop_t:
 	ld a,(hl)
 	ld (rdc_gf),a
 	pop hl
+	; nothing changed in the group's screen/colour and no character changed:
+	; all 8 cells are clean
+	push hl
+	ld hl,any_chd
+	or (hl)
+	pop hl
+	jr z,rdc_skip_t
 rdc_ng:
 	ld a,(rdc_gf)
 	or a
@@ -750,6 +919,14 @@ rdc_cand_t:
 	and $0F
 	cp (iy+1)
 	jp nz,rdc_dirty_t
+	; same character and colour: its 8 bytes only matter if they changed
+	push hl
+	ld l,(hl)
+	ld h,CHDIRTY/256
+	ld a,(hl)
+	pop hl
+	or a
+	jp z,rdc_clean_t
 	; text: compare the character's 8 bytes
 	push hl
 	push de
@@ -804,49 +981,121 @@ rdc_store_t:
 	ld a,b
 	or a
 	ret
+rdc_skip_t:                     ; 8 clean cells
+	xor a
+	ld (ix+0),a
+	ld (ix+1),a
+	ld (ix+2),a
+	ld (ix+3),a
+	ld (ix+4),a
+	ld (ix+5),a
+	ld (ix+6),a
+	ld (ix+7),a
+	push bc
+	ld bc,8
+	add ix,bc
+	add hl,bc
+	ex de,hl
+	add hl,bc
+	ex de,hl
+	ld bc,80
+	add iy,bc
+	pop bc
+	ld a,c
+	add a,8
+	ld c,a
+	cp 40
+	jp nz,rdc_loop_t
+	ld a,b
+	or a
+	ret
 rdc_loop_b:
+	ld a,c
+	and 7
+	jr nz,rdc_bn
+	; group start: screen/colour-changed flag and the bitmap dirty bits
 	push hl
 	ld a,c
 	rrca
 	rrca
 	rrca
 	and $1F
+	push af
 	add a,rd_sgrp & 255
 	ld l,a
 	ld h,rd_sgrp/256
-	ld a,(hl)                   ; screen/colour changed in this group
-	pop hl
-	or a
-	jr nz,rdc_cand_b
-	push hl
-	ld a,c
-	and 7
-	add a,bittab & 255
-	ld l,a
-	ld h,bittab/256
-	ld a,c
-	rrca
-	rrca
-	rrca
-	and $1F
+	ld a,(hl)
+	ld (rdc_gf),a
+	pop af
 	add a,rd_grp & 255
-	push hl
 	ld l,a
 	ld h,rd_grp/256
-	ld a,(hl)                   ; dirty bits of the cell's group
+	ld a,(hl)
+	ld (rdc_bg),a
+	ld hl,rdc_gf
+	or (hl)
 	pop hl
-	and (hl)                    ; this cell's bit
-	pop hl
+	jp z,rdc_skip_b             ; all 8 cells clean
+rdc_bn:
+	ld a,(rdc_bg)
+	srl a                       ; bit 0 = this cell (bittab order)
+	ld (rdc_bg),a
+	jr c,rdc_cand_b
+	ld a,(rdc_gf)
+	or a
 	jr nz,rdc_cand_b
 	jp rdc_clean_b
+rdc_skip_b:                     ; 8 clean cells
+	push hl
+	ld a,c
+	add a,celldirty & 255
+	ld l,a
+	ld h,celldirty/256
+	xor a
+	ld (hl),a
+	inc l
+	ld (hl),a
+	inc l
+	ld (hl),a
+	inc l
+	ld (hl),a
+	inc l
+	ld (hl),a
+	inc l
+	ld (hl),a
+	inc l
+	ld (hl),a
+	inc l
+	ld (hl),a
+	pop hl
+	push bc
+	ld bc,8
+	add hl,bc
+	ex de,hl
+	add hl,bc
+	ex de,hl
+	ld bc,80
+	add iy,bc
+	ld bc,64
+	add ix,bc
+	pop bc
+	ld a,c
+	add a,8
+	ld c,a
+	cp 40
+	jp nz,rdc_loop_b
+	ld a,b
+	or a
+	ret
 rdc_cand_b:
 	ld a,(hl)
 	cp (iy+0)
-	jp nz,rdc_dirty_b
+	jp nz,rdc_cdiff
 	ld a,(de)
 	and $0F
 	cp (iy+1)
-	jp nz,rdc_dirty_b
+	jp nz,rdc_cdiff
+rdc_bytes:
 	ld a,(ix+0)
 	cp (iy+2)
 	jp nz,rdc_dirty_b
@@ -874,6 +1123,35 @@ rdc_cand_b:
 rdc_clean_b:
 	xor a
 	jr rdc_store_b
+rdc_cdiff:
+	; screen/colour RAM changed.  A multicolour cell whose 8 bytes are 0 (now
+	; and as drawn) shows only $D021: take the new colours without a redraw
+	ld a,(row_mode)
+	rrca
+	jp nc,rdc_dirty_b
+	ld a,(ix+0)
+	or (ix+1)
+	or (ix+2)
+	or (ix+3)
+	or (ix+4)
+	or (ix+5)
+	or (ix+6)
+	or (ix+7)
+	or (iy+2)
+	or (iy+3)
+	or (iy+4)
+	or (iy+5)
+	or (iy+6)
+	or (iy+7)
+	or (iy+8)
+	or (iy+9)
+	jp nz,rdc_dirty_b
+	ld a,(hl)
+	ld (iy+0),a
+	ld a,(de)
+	and $0F
+	ld (iy+1),a
+	jr rdc_clean_b
 rdc_dirty_b:
 	ld b,1
 	ld a,1
@@ -906,12 +1184,7 @@ rdc_store_b:
 ; 5 group flags (8 bytes each) for offsets HL..HL+39 -> (DE)..(DE+4)
 ; A = 0: HL is a VIC bank offset (VDW), A = 1: colour RAM offset (cdw)
 grp_bits:
-	ld (gb_mode),a
-	ld b,5
-gb_l:
-	push bc
-	push de
-	push hl
+	push af
 	ld a,l
 	rrca
 	rrca
@@ -921,28 +1194,29 @@ gb_l:
 	ld c,a
 	ld b,bittab/256
 	ld a,(bc)
-	ld b,a                      ; mask
+	ld c,a                      ; C = mask of the first group's 8-byte block
 	call chunk_of
 	ld l,a
 	ld h,VDW/256
-	ld a,(gb_mode)
+	pop af
 	or a
-	jr z,gb_v
+	jr z,gb_go
 	ld a,l
 	and 15
 	add a,cdw & 255
 	ld l,a
 	ld h,cdw/256
-gb_v:
+gb_go:
+	ld b,5
+gb_l:                           ; next group = next bit (next byte after bit 7)
 	ld a,(hl)
-	and b
-	pop hl
-	pop de
+	and c
 	ld (de),a
 	inc de
-	ld bc,8
-	add hl,bc
-	pop bc
+	rlc c
+	jr nc,gb_n
+	inc l                       ; VDW / cdw are page aligned
+gb_n:
 	djnz gb_l
 	ret
 
@@ -1017,28 +1291,17 @@ cha_l:
 	ret
 
 ; HL -> shadow record of cell C of the current row (preserves BC)
-shadow_ptr:
+shadow_ptr:                     ; C = column -> HL = its SHADOW entry
 	push de
-	ld a,(cur_row)
-	ld l,a
+	ld l,c
 	ld h,0
-	add hl,hl
-	ld de,row40
-	add hl,de
-	ld a,(hl)
-	inc hl
-	ld h,(hl)
-	ld l,a
-	ld e,c
-	ld d,0
-	add hl,de                   ; cell index
 	add hl,hl
 	ld d,h
 	ld e,l
 	add hl,hl
 	add hl,hl
-	add hl,de                   ; *10
-	ld de,SHADOW
+	add hl,de                   ; c*10
+	ld de,(row_shad)
 	add hl,de
 	pop de
 	ret
@@ -1057,25 +1320,24 @@ shadow_store:
 	inc de
 	pop hl
 	push bc
-	ld bc,8
-	ldir
+	ldi
+	ldi
+	ldi
+	ldi
+	ldi
+	ldi
+	ldi
+	ldi
 	pop bc
 	ret
 
 ; HL = bank offset -> A = 64-byte chunk index
 chunk_of:
-	ld a,l
-	rlca
-	rlca
-	and 3
-	push bc
-	ld b,a
+	push hl
+	add hl,hl
+	add hl,hl                   ; H = (offset & $3FC0) >> 6
 	ld a,h
-	and $3F
-	add a,a
-	add a,a
-	or b
-	pop bc
+	pop hl
 	ret
 
 ; ============================================================================
@@ -1136,10 +1398,14 @@ row_blank:
 ; A = row -> HL = y in the clean buffer; the row is marked changed
 row_y_clean:
 	ld e,a
-	ld d,0
-	ld hl,SH_ROWS
-	add hl,de
+	ld h,SH_ROWS/256
+	ld l,a
 	ld (hl),1
+	set 7,l                     ; SPAN_LO
+	ld (hl),0
+	set 5,l                     ; SPAN_HI
+	ld (hl),SPAN_FULL
+row_y_of:                       ; E = row -> HL = y in the clean buffer, no mark
 	ld l,e
 	ld h,0
 	add hl,hl
@@ -1149,42 +1415,45 @@ row_y_clean:
 	add hl,de
 	ret
 
-; render run_len cells from run_start into BUF, send with LMMC, copy to display
-draw_run:
-	ld a,(run_len)
-	ld b,a
-	add a,a
-	add a,b
-	add a,a                     ; 6k
+; mark clean row cur_row changed over [D, E) (4-pixel units)
+span_mark:
+	ld a,(cur_row)
 	ld l,a
-	ld h,0
-	ld (stride),hl
-	ld ix,BUF
-	ld a,(run_start)
-	ld c,a
-dr_cell:
-	ld hl,(dbg_cnt)
-	inc hl
-	ld (dbg_cnt),hl
-	push bc
-	push ix
-	call cell_colours           ; fills cell_cols, returns HL = source bytes
-	push hl
-	call shadow_store
-	pop hl
-	push hl
-	call nt_build
-	pop hl
-	pop ix
-	push ix
-	call cell_pixels
-	pop ix
-	ld de,6
-	add ix,de
-	pop bc
-	inc c
-	djnz dr_cell
-	; LMMC: x = SCREEN_X + 12*start + xoff, y = clean row
+	ld h,SH_ROWS/256
+	ld a,(hl)
+	ld (hl),1
+	set 7,l                     ; SPAN_LO
+	or a
+	jr z,sm_new
+	ld a,(hl)
+	cp d
+	jr c,sm_lo
+	ld (hl),d
+sm_lo:
+	set 5,l                     ; SPAN_HI
+	ld a,(hl)
+	cp e
+	ret nc
+	ld (hl),e
+	ret
+sm_new:
+	ld (hl),d
+	set 5,l
+	ld (hl),e
+	ret
+
+; render run_len cells from run_start: one LMMC per cell (12x8 pixels), the
+; pixels go straight to the command port (no buffer, no stride)
+draw_run:
+	ld a,(cur_row)
+	ld e,a
+	call row_y_of
+	ld (cmdblk+6),hl
+	ld hl,12
+	ld (cmdblk+8),hl
+	ld hl,8
+	ld (cmdblk+10),hl
+	; x = SCREEN_X + 12*start + xoff
 	ld a,(run_start)
 	ld l,a
 	ld h,0
@@ -1201,40 +1470,142 @@ dr_cell:
 	ld d,0
 	add hl,de
 	ld (cmdblk+4),hl
-	ld a,(cur_row)
-	call row_y_clean
-	ld (cmdblk+6),hl
+	; changed span: [x/4, x/4 + 3*len + 1)
+	ld de,-SCREEN_X
+	add hl,de
+	srl h
+	rr l
+	srl l
+	ld d,l
 	ld a,(run_len)
-	ld l,a
-	ld h,0
-	add hl,hl
-	add hl,hl
-	ld d,h
-	ld e,l
-	add hl,hl
-	add hl,de                   ; 12k
-	ld (cmdblk+8),hl
-	ld hl,8
-	ld (cmdblk+10),hl
-	call lmmc_start
-	ld hl,BUF
-	ld a,(stride)
-	ld d,a
-	ld e,8
-dr_send:
-	ld b,d
-	ld c,V_CMD
-dr_s6:
-	outi                        ; 6 bytes (one cell) per pass: stride is a multiple of 6
-	outi
-	outi
-	outi
-	outi
-	outi
-	jr nz,dr_s6
-	dec e
-	jr nz,dr_send
+	ld e,a
+	add a,a
+	add a,e
+	inc a
+	add a,d
+	ld e,a
+	call span_mark
+	ld a,1
+	ld (dr_full),a
+	xor a
+	ld (pf_n),a
+	ld a,(run_len)
+	ld b,a
+	ld a,(run_start)
+	ld c,a
+dr_cell:
+	ld hl,(dbg_cnt)
+	inc hl
+	ld (dbg_cnt),hl
+	push bc
+	call cell_colours           ; fills cell_cols, returns HL = source bytes
+	push hl
+	call shadow_store
+	pop hl
+	push hl
+	call nt_build
+	pop hl
+	call cell_uniform
+	jr nz,dr_pix
+	; one colour: merge with the pending fill when it continues it
+	ld b,a
+	ld a,(pf_n)
+	or a
+	jr z,dr_pf_new
+	ld a,(pf_col)
+	cp b
+	jr z,dr_pf_ext
+	push bc
+	call dr_flush
+	pop bc
+dr_pf_new:
+	ld a,b
+	ld (pf_col),a
+	ld hl,(cmdblk+4)
+	ld (pf_dx),hl
+	ld a,1
+	ld (pf_n),a
+	jr dr_adv
+dr_pf_ext:
+	ld hl,pf_n
+	inc (hl)
+	jr dr_adv
+dr_pix:
+	push hl
+	call dr_flush
+	pop hl
+	ld a,(dr_full)
+	or a
+	jr z,dr_next
+	xor a
+	ld (dr_full),a
+	push hl
+	call lmmc_start             ; full command
+	pop hl
+	jr dr_out
+dr_next:                        ; later cells: resend only DX/DY/NX/NY (R#36-R#43;
+	call v_wait                 ; the command updates them) and the opcode
+	call k_get_iff
+	push hl
+	push af
+	di
+	ld a,36
+	out (V_SEL),a
+	ld hl,cmdblk+4
+	ld bc,8*256+V_REG
+	otir
+	pop af
+	ld c,a
+	pop hl
+	ld a,52
+	out (V_SEL),a
+	ld a,$10                    ; LMMC
+	out (V_REG),a
+	ld a,c
+	or a
+	jr z,dr_out
+	ei
+dr_out:
+	call cell_out
+dr_adv:
+	ld hl,(cmdblk+4)
+	ld de,12
+	add hl,de
+	ld (cmdblk+4),hl
+	pop bc
+	inc c
+	dec b
+	jp nz,dr_cell
+	call dr_flush
 	jp csel_fix
+
+; send the pending merged one-colour fill (pf_n cells from pf_dx)
+dr_flush:
+	ld a,(pf_n)
+	or a
+	ret z
+	ld hl,(cmdblk+4)
+	push hl
+	ld hl,(pf_dx)
+	ld (cmdblk+4),hl
+	ld b,a
+	ld hl,0
+	ld de,12
+df_l:
+	add hl,de
+	djnz df_l
+	ld (cmdblk+8),hl
+	ld a,(pf_col)
+	call lmmv
+	pop hl
+	ld (cmdblk+4),hl
+	ld hl,12
+	ld (cmdblk+8),hl
+	xor a
+	ld (pf_n),a
+	inc a
+	ld (dr_full),a
+	ret
 
 ; 38-column mode: border over the outer columns of this row
 csel_fix:
@@ -1272,20 +1643,9 @@ csf_do:
 ; ============================================================================
 cell_colours:
 	; colour RAM
-	ld a,(cur_row)
-	ld l,a
-	ld h,0
-	add hl,hl
-	ld de,row40
-	add hl,de
-	ld a,(hl)
-	inc hl
-	ld h,(hl)
-	ld l,a
+	ld hl,(row_cram)
 	ld b,0
 	add hl,bc
-	ld de,COLOR_RAM
-	add hl,de
 	ld a,(hl)
 	and $0F
 	ld (spr_tmp),a              ; colour RAM nibble
@@ -1392,6 +1752,27 @@ cc_hires_bm:
 
 ; C64 colour A -> palette slot A (allocated on first use)
 fix_slot:
+	and 15
+	push hl
+	ld hl,fslot
+	add a,l
+	ld l,a
+	ld a,(hl)
+	or a
+	jr z,fs_slow
+	pop hl
+	ret
+fs_slow:                        ; HL = fslot entry: allocate, then cache it
+	ld a,l
+	sub fslot & 255
+	call fs_alloc
+	cp PAL_FIXED
+	jr z,fs_nocache             ; maybe the out-of-slots fallback: ask again next time
+	ld (hl),a
+fs_nocache:
+	pop hl
+	ret
+fs_alloc:
 	push hl
 	push bc
 	and 15
@@ -1501,53 +1882,86 @@ ntb_new:
 	or a
 	jr z,ntb_hires
 	; multicolour: nibble = fat pixels a (hi 2 bits), b (lo 2 bits)
-	; bytes: aa, ab, bb
-	ld hl,NT
-	ld c,0
-ntb_mc:
-	ld a,c
-	rrca
-	rrca
-	and 3
-	call ntb_col
-	ld d,a                      ; a
-	ld a,c
-	and 3
-	call ntb_col
-	ld e,a                      ; b
-	ld a,d
-	add a,a
-	add a,a
-	add a,a
-	add a,a
-	ld b,a
-	or d
-	ld (hl),a
-	inc l
-	ld a,b
-	or e
-	ld (hl),a
-	inc l
-	ld a,e
-	add a,a
-	add a,a
-	add a,a
-	add a,a
-	or e
-	ld (hl),a
-	inc l
-	inc c
-	ld a,c
-	cp 16
-	jr nz,ntb_mc
-	ret
-ntb_col:                        ; A = 0..3 -> nt_key[1+A]
-	push hl
+	; bytes: aa, ab, bb.  ntq = 4 x (colour, colour * $11)
 	ld hl,nt_key+1
-	add a,l
-	ld l,a
+	ld de,ntq
+	ld b,4
+ntb_q:
 	ld a,(hl)
-	pop hl
+	inc hl
+	ld (de),a
+	inc de
+	ld c,a
+	add a,a
+	add a,a
+	add a,a
+	add a,a
+	or c
+	ld (de),a
+	inc de
+	djnz ntb_q
+	ld hl,NT
+	ld a,(nt_key+1)
+	call ntb_row
+	ld a,(nt_key+2)
+	call ntb_row
+	ld a,(nt_key+3)
+	call ntb_row
+	ld a,(nt_key+4)
+ntb_row:                        ; A = colour a -> the 4 entries a,0..a,3 at HL (NT page aligned)
+	ld b,a
+	add a,a
+	add a,a
+	add a,a
+	add a,a
+	ld c,a                      ; a << 4
+	or b
+	ld b,a                      ; a * $11
+	ld de,ntq
+	ld (hl),b
+	inc l
+	ld a,(de)
+	inc de
+	or c
+	ld (hl),a
+	inc l
+	ld a,(de)
+	inc de
+	ld (hl),a
+	inc l
+	ld (hl),b
+	inc l
+	ld a,(de)
+	inc de
+	or c
+	ld (hl),a
+	inc l
+	ld a,(de)
+	inc de
+	ld (hl),a
+	inc l
+	ld (hl),b
+	inc l
+	ld a,(de)
+	inc de
+	or c
+	ld (hl),a
+	inc l
+	ld a,(de)
+	inc de
+	ld (hl),a
+	inc l
+	ld (hl),b
+	inc l
+	ld a,(de)
+	inc de
+	or c
+	ld (hl),a
+	inc l
+	ld a,(de)
+	inc de
+	ld (hl),a
+	inc l
 	ret
 ntb_hires:
 	; bits h0..h3 (msb first) -> pixels h0, h0|h1, h1, h2, h2|h3, h3
@@ -1609,50 +2023,98 @@ ntb_bit:                        ; Z -> colour 0 (nt_key+1), NZ -> colour 1 (nt_k
 	ld a,(nt_key+2)
 	ret
 
-; HL = 8 source bytes, IX = destination in BUF, stride in (stride)
-cell_pixels:
-	ld b,8
-cp_line:
+; HL = 8 source bytes: Z and A = colour byte if the whole cell is one colour
+; (8 equal bytes whose two nibbles expand to 6 equal bytes).  Preserves HL.
+cell_uniform:
+	push hl
 	ld a,(hl)
+	ld b,7
+cu_l:
 	inc hl
-	exx
+	cp (hl)
+	jr nz,cu_no
+	djnz cu_l
+	pop hl
 	ld c,a
 	rrca
 	rrca
 	rrca
 	rrca
 	and $0F
-	ld l,a
-	add a,a
-	add a,l
-	ld l,a
-	ld h,NT/256
-	ld a,(hl)
-	ld (ix+0),a
-	inc l
-	ld a,(hl)
-	ld (ix+1),a
-	inc l
-	ld a,(hl)
-	ld (ix+2),a
+	call cu_ent
+	ld a,(de)
+	ld b,a                      ; B = first pixel byte
+	call cu_chk3
+	ret nz
 	ld a,c
 	and $0F
-	ld l,a
+	call cu_ent
+	call cu_chk3
+	ld a,b
+	ret
+cu_no:
+	pop hl
+	ret
+cu_ent:                         ; A = nibble -> DE = its NT entry
+	ld e,a
 	add a,a
-	add a,l
-	ld l,a
+	add a,e
+	ld e,a
+	ld d,NT/256
+	ret
+cu_chk3:                        ; Z if the 3 bytes at DE all equal B
+	ld a,(de)
+	cp b
+	ret nz
+	inc e
+	ld a,(de)
+	cp b
+	ret nz
+	inc e
+	ld a,(de)
+	cp b
+	ret
+
+; HL = 8 source bytes -> 8 lines of 6 bytes to the LMMC data port (NT page aligned)
+cell_out:
+	ld b,8
+	ld d,NT/256
+co_line:
 	ld a,(hl)
-	ld (ix+3),a
-	inc l
-	ld a,(hl)
-	ld (ix+4),a
-	inc l
-	ld a,(hl)
-	ld (ix+5),a
-	exx
-	ld de,(stride)
-	add ix,de
-	djnz cp_line
+	inc hl
+	ld c,a
+	rrca
+	rrca
+	rrca
+	rrca
+	and $0F
+	ld e,a
+	add a,a
+	add a,e
+	ld e,a
+	ld a,(de)
+	out (V_CMD),a
+	inc e
+	ld a,(de)
+	out (V_CMD),a
+	inc e
+	ld a,(de)
+	out (V_CMD),a
+	ld a,c
+	and $0F
+	ld e,a
+	add a,a
+	add a,e
+	ld e,a
+	ld a,(de)
+	out (V_CMD),a
+	inc e
+	ld a,(de)
+	out (V_CMD),a
+	inc e
+	ld a,(de)
+	out (V_CMD),a
+	djnz co_line
 	ret
 
 ; ============================================================================
@@ -1669,11 +2131,31 @@ v_send_cmd:                     ; write R#32..R#52 atomically
 	call k_get_iff
 	push af
 	di
+	ld a,(cmdblk+20)
+	cp $40
 	ld a,32
-	out (V_SEL),a
 	ld hl,cmdblk
-	ld bc,21*256+V_REG
+	ld bc,14*256+V_REG          ; R#32..R#45; WM (R#46/47) stays $FFFF from v_init
+	jr nc,vsc_sx                ; LMMM and up read SX/SY
+	ld a,36                     ; LMMC/LMMV: from DX
+	ld l,cmdblk+4 & 255
+	ld b,10
+vsc_sx:
+	out (V_SEL),a
 	otir
+	ld a,(cmdblk+20)
+	cp $20
+	jr nz,vsc_op
+	ld a,48                     ; FC: only LMMV uses it
+	out (V_SEL),a
+	ld hl,cmdblk+16
+	ld b,2
+	otir
+vsc_op:
+	ld a,52
+	out (V_SEL),a
+	ld a,(cmdblk+20)
+	out (V_REG),a
 	pop af
 	or a
 	ret z
@@ -1774,7 +2256,7 @@ sync_rows:
 sr_loop:
 	ld a,c
 	or a
-	jr nz,sr_do
+	jr nz,sr_full
 	ld hl,SH_ROWS
 	add hl,de
 	ld b,(hl)                   ; changed this frame
@@ -1799,6 +2281,9 @@ sr_old:
 	jr z,sr_next
 sr_do:
 	call sync_row
+	jr sr_next
+sr_full:
+	call sync_row_full
 sr_next:
 	inc e
 	ld a,e
@@ -1806,9 +2291,66 @@ sr_next:
 	jr nz,sr_loop
 	ret
 
-; copy the 480x8 strip of row E from clean to the page being built
+; copy row E from clean to the page being built: the span changed this
+; and last frame (the page is two frames old)
 sync_row:
 	push bc
+	push de
+	ld h,SH_ROWS/256
+	ld l,e
+	ld b,(hl)                   ; changed this frame
+	set 5,l
+	ld c,(hl)                   ; changed last frame (SH_ROWP)
+	ld d,255
+	ld e,0
+	res 5,l
+	set 7,l                     ; SPAN_LO
+	ld a,b
+	or a
+	jr z,srs_p
+	ld d,(hl)
+	set 5,l
+	ld e,(hl)
+	res 5,l
+srs_p:
+	ld a,c
+	or a
+	jr z,srs_go
+	set 6,l                     ; SPANP_LO
+	ld a,(hl)
+	cp d
+	jr nc,srs_1
+	ld d,a
+srs_1:
+	set 5,l                     ; SPANP_HI
+	ld a,(hl)
+	cp e
+	jr c,srs_go
+	ld e,a
+srs_go:
+	ld a,d
+	cp e
+	jr c,srs_have
+sync_row_fullx:                 ; nothing flagged: whole row
+	ld d,0
+	ld e,SPAN_FULL
+srs_have:
+	ld a,e
+	sub d
+	ld l,a
+	ld h,0
+	add hl,hl
+	add hl,hl
+	ld (cmdblk+8),hl            ; NX
+	ld l,d
+	ld h,0
+	add hl,hl
+	add hl,hl
+	ld bc,SCREEN_X
+	add hl,bc
+	ld (cmdblk+0),hl
+	ld (cmdblk+4),hl
+	pop de
 	push de
 	ld l,e
 	ld h,0
@@ -1825,11 +2367,6 @@ sync_row:
 	ld bc,CLEAN_Y
 	add hl,bc
 	ld (cmdblk+2),hl
-	ld hl,SCREEN_X
-	ld (cmdblk+0),hl
-	ld (cmdblk+4),hl
-	ld hl,480
-	ld (cmdblk+8),hl
 	ld hl,8
 	ld (cmdblk+10),hl
 	pop hl
@@ -1837,6 +2374,10 @@ sync_row:
 	pop de
 	pop bc
 	ret
+sync_row_full:
+	push bc
+	push de
+	jr sync_row_fullx
 
 
 
@@ -1937,6 +2478,10 @@ sp_done:
 	ld hl,SH_ROWS
 	ld de,SH_ROWP
 	ld bc,25
+	ldir
+	ld hl,SPAN_LO
+	ld de,SPANP_LO
+	ld bc,64
 	ldir
 	ld hl,SH_ROWS
 	ld de,SH_ROWS+1

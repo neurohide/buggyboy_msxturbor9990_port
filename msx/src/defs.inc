@@ -94,6 +94,13 @@ pal_bank:        equ KVARS+$C7       ; palette bank on screen (0/1, R#13 offset)
 raster_base:     equ KVARS+$C8       ; 2: C64 line at the last raster clock restart
 bank_live:       equ KVARS+$CA       ; 8: live colours last written into V9990 palette bank 0/1 ($FF = unknown)
 sli_last:        equ KVARS+$D2       ; 2: line+1 last written to V9990 R#10 (0 = unknown)
+skip_n:          equ KVARS+$D4       ; vblanks in a row without a render (frame unchanged)
+mt_sync:         equ KVARS+$D5       ; main code polled the raster since the last render
+mt_head:         equ KVARS+$D6       ; vblanks left in game-loop mode (renders follow MAIN_LOOP)
+kb_n:            equ KVARS+$D7       ; kerb bands left in the native line-IRQ chain (k_int fast path)
+kb_ptr:          equ KVARS+$D8       ; 2: next kb_list entry (its C64 line)
+kb_list:         equ $3040           ; 23: (line, colour) per chained band, then band 12's line
+; KVARS+$E0..: C64 page-3 variables relocated by translate.py RELOC ($FB2A)
 
 ; timeline: two buffers of TL_MAX records of 64 bytes (in two separate holes)
 TIMELINE:        equ $3100

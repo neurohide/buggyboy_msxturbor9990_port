@@ -17,7 +17,7 @@ from c64image import load_image  # noqa: E402
 KERNEL_REGIONS = {
     'im2': (0x27FF, 0x2900),
     'mem': (0x0E00, 0x1000),
-    'k2': (0x8000, 0x8D00),
+    'k2': (0x8000, 0x8DDF),     # $8CF2-$8DDE: 6502 code only
 }
 ROM_BANKS = 16      # 256K ASCII16
 INTRO_BANK = 15     # must match src/loader.asm
@@ -117,6 +117,9 @@ def main():
         start, b = chunks[name]
         mem[start:start + len(b)] = b
     build_lookup(mem, lab, nseg)
+    from translate import RELOC_TAB
+    for lo, hi, d in RELOC_TAB:
+        mem[d:d + hi - lo] = mem[lo:hi]
     # render segment: code + zeroed variable area
     rstart, rb = chunks['render']
     render = bytes(rb) + bytes(0x4000 - len(rb))
