@@ -99,6 +99,9 @@ mt_sync:         equ KVARS+$D5       ; main code polled the raster since the las
 mt_head:         equ KVARS+$D6       ; vblanks left in game-loop mode (renders follow MAIN_LOOP)
 kb_n:            equ KVARS+$D7       ; kerb bands left in the native line-IRQ chain (k_int fast path)
 kb_ptr:          equ KVARS+$D8       ; 2: next kb_list entry (its C64 line)
+pace_due:        equ KVARS+$DA       ; frame_count when the next race-loop pass is due
+pace_np:         equ KVARS+$DB       ; race-loop passes skipped since the last render
+PACE_VBLS:       equ 4               ; vblanks per race-loop pass (C64 original: ~6)
 kb_list:         equ $3040           ; 23: (line, colour) per chained band, then band 12's line
 ; KVARS+$E0..: C64 page-3 variables relocated by translate.py RELOC ($FB2A)
 

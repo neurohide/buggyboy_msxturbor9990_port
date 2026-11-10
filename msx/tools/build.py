@@ -108,6 +108,12 @@ def main():
             print('%-6s %04X-%04X (%d bytes free)' % (name, start, end - 1, hi - end))
             if start < lo or end > hi:
                 sys.exit('region %s out of bounds' % name)
+        elif name == 'render':
+            # runtime tables above the code (SCACHE, CMMC tables) must not overlap it
+            low = min(lab[k] for k in ('SCACHE', 'CM_TA', 'CM_PT') if k in lab)
+            print('render %04X-%04X (%d bytes before runtime tables)' % (start, lab['region_render_end'] - 1, low - lab['region_render_end']))
+            if lab['region_render_end'] > low:
+                sys.exit('render code overlaps its runtime tables')
         elif name.startswith('seg'):
             print('%-6s %d bytes' % (name, lab['%s_end' % name] - 0x4000))
     if pos != len(data):

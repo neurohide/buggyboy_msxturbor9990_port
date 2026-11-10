@@ -18,11 +18,11 @@ region_render_start:
 	jp render
 
 ; ---------------------------------------------------------------- variables
-NT:              equ $7000           ; nibble table: 16 x 3 bytes
+NT:              equ $7000           ; nibble table: 16 x 4 bytes (3 used)
 BUF:             equ $7100           ; cell pixels, line-major, up to 40 cells
 VDW:             equ $7900           ; work copy of VDIRTY
 CHDIRTY:         equ $7A00           ; per character code
-SCACHE:          equ $5800           ; sprite cache: 128 slots x 8 bytes ($5800-$5BFF, above the code)
+SCACHE:          equ $6800           ; sprite cache: 128 slots x 8 bytes ($6800-$6BFF, above LTL)
 RV:              equ $7F00           ; misc variables (overlaps nothing below $7F00)
 SC_SLOTS:        equ 128
 
@@ -47,7 +47,7 @@ any_chd:         equ RV+$46
 first_done:      equ RV+$47
 slot_of:         equ RV+$48          ; 16: C64 colour -> palette slot (0 = none)
 next_slot:       equ RV+$58
-celldirty:       equ RV+$59          ; 40
+celldirty:       equ $7040           ; 40 + sentinel $80 (row_render scan)
 tl_ptr:          equ RV+$81          ; 2: next event record
 tl_left:         equ RV+$83          ; events left
 rec_cur:         equ RV+$84          ; 2
@@ -61,6 +61,7 @@ pf_dx:           equ RV+$A0          ; 2 their first x
 spr_tmp:         equ RV+$D0          ; 32 scratch
 rdc_gf:          equ spr_tmp+20      ; rd_cells: group-changed flag (sprites are not drawn meanwhile)
 rdc_bg:          equ spr_tmp+21      ; rd_cells: bitmap dirty bits of the group, shifted per cell
+rdc_gs:          equ spr_tmp+22      ; rd_cells: first column of the group
 row_cram:        equ RV+$A2          ; 2: COLOR_RAM + r*40 (row_setup)
 row_shad:        equ RV+$AD          ; 2: SHADOW + r*400 (row_setup)
 rgn_rec:         equ RV+$A5          ; 2 record of the sprite region
@@ -69,6 +70,17 @@ rgn_hi:          equ RV+$A9          ; 2 first raster line after region
 coll_acc:        equ RV+$AB
 ntq:             equ RV+$B0          ; 8: nt_build, 4 x (colour, colour * $11)
 fslot:           equ RV+$B8          ; 16: fix_slot cache, C64 colour -> slot (0 = not yet)
+cc_key:          equ RV+$C8          ; 3: row_mode, colour nibble, screen byte cell_cols was made from
+row_xchg:        equ RV+$CC          ; row_setup: the row's x offset changed this frame
+cm_fc:           equ RV+$CD          ; CMMC cell: foreground colour byte (colour * $11)
+cm_bc:           equ RV+$CE          ; background colour byte
+cm_x:            equ RV+$CF          ; fg value * $55: XOR makes fg pixels 00
+CM_TA:           equ $5C00           ; CMMC tables, index = source byte ^ cm_x, 12 bits
+CM_TB:           equ $5D00           ; per byte (bit 11 = left pixel, fg pixel = 1):
+CM_TC:           equ $5E00           ; TA = bits 11-4, TB = bits 3-0 << 4,
+CM_TD:           equ $5F00           ; TC = bits 11-8, TD = bits 7-0
+CM_PT:           equ $6600           ; byte -> mask of the 2-bit pixel values in it
+cc_hit:          equ RV+$CB          ; cell_colours reused cell_cols (so NT is still built for it)
 rgn_idx:         equ RV+$AC
 dbg_cells:       equ RV+$F0          ; 2: cells drawn last frame
 dbg_full:        equ RV+$F2          ; rows fully redrawn last frame
@@ -160,6 +172,7 @@ r_sci_n:
 	djnz r_sci
 	ld a,$FF
 	ld (chd_cb),a
+	ld (cc_key),a               ; no row_mode is $FF: cell_cols is rebuilt
 	xor a
 	ld (mode_rows),a
 	ld hl,(dbg_cnt)
@@ -210,6 +223,9 @@ rr_next:
 render_first:
 	ld a,1
 	ld (first_done),a
+	call cm_init
+	ld a,$80
+	ld (celldirty+40),a         ; row_render scan sentinel
 	ld hl,SH_XOFF
 	ld (hl),$FF
 	ld de,SH_XOFF+1
@@ -506,9 +522,14 @@ rs_den:
 	ld d,0
 	ld hl,SH_XOFF
 	add hl,de
+	xor a
+	ld (row_xchg),a
 	ld a,(row_xoff)
 	cp (hl)
 	jr z,rs_xsame
+	ld a,1
+	ld (row_xchg),a
+	ld a,(row_xoff)
 	ld b,(hl)                   ; old offset
 	ld (hl),a
 	ld hl,row_full
@@ -830,7 +851,7 @@ rdm_l:
 	ld hl,rd_any
 	or (hl)
 	ret z                       ; text row: nothing changed
-	jr rd_cells
+	jr rd_coarse
 rd_bmprep:
 	; a bitmap row is 320 bytes = 5 aligned chunks of 8 cells each
 	ld hl,(row_bmoff)
@@ -850,6 +871,244 @@ rdg_l:
 	ld a,(rd_any)
 	or c
 	ret z
+rd_coarse:
+	; the horizon scrolls by whole cells: when the row matches its shadow
+	; moved by k columns, move the drawn row and the shadow instead, then
+	; compare every cell (the dirty groups no longer describe what is drawn)
+	call row_coarse
+	jp z,rd_cells
+	ld a,$FF
+	ld hl,rd_sgrp
+	ld b,5
+rdk_l:
+	ld (hl),a
+	inc hl
+	djnz rdk_l
+	ld hl,rd_grp
+	ld b,5
+rdk_l2:
+	ld (hl),a
+	inc hl
+	djnz rdk_l2
+	call rd_cells
+	; the 38-column border drawn over cells 0 and 39 moved inwards
+	ld a,1
+	ld hl,celldirty
+	ld (hl),a
+	inc hl
+	ld (hl),a
+	inc hl
+	ld (hl),a
+	ld hl,celldirty+37
+	ld (hl),a
+	inc hl
+	ld (hl),a
+	inc hl
+	ld (hl),a
+	or a                        ; NZ
+	ret
+
+; Z = no whole-cell move.  NZ: the row was moved by k (+-1, +-2) columns,
+; in VRAM (one LMMM) and in SHADOW.  Probes columns 10, 20 and 30.
+row_coarse:
+	ld a,(row_xchg)
+	or a
+	jr z,rc_no                  ; a whole-cell scroll comes with an xscroll wrap
+	ld a,(row_mode)
+	bit 2,a
+	jr nz,rc_no                 ; blank row
+	ld d,0
+	call rc_try
+	jr z,rc_no                  ; unmoved
+	ld d,1
+	call rc_try
+	jr z,rc_go
+	ld d,-1
+	call rc_try
+	jr z,rc_go
+	ld d,2
+	call rc_try
+	jr z,rc_go
+	ld d,-2
+	call rc_try
+	jr z,rc_go
+rc_no:
+	xor a
+	ret
+rc_go:
+	push de
+	ld a,(cur_row)
+	call row_y_clean            ; also marks the row for the page sync
+	ld (cmdblk+2),hl
+	ld (cmdblk+6),hl
+	ld hl,8
+	ld (cmdblk+10),hl
+	pop de
+	push de
+	ld a,d
+	bit 7,a
+	jr z,rc_pos
+	neg
+rc_pos:
+	ld b,a                      ; |k|
+	add a,a
+	add a,b
+	add a,a
+	add a,a                     ; 12|k|
+	ld e,a
+	ld d,0
+	ld hl,480
+	or a
+	sbc hl,de
+	ld (cmdblk+8),hl            ; NX = 480 - 12|k|
+	ld a,(row_xoff)
+	ld c,a
+	ld b,0
+	ld hl,SCREEN_X
+	add hl,bc                   ; HL = x of cell 0
+	pop bc                      ; B = k
+	push bc
+	bit 7,b
+	jr nz,rc_left
+	; right: copy backwards from the last pixel, DIX=1
+	push de
+	ld de,479
+	add hl,de
+	pop de
+	ld (cmdblk+4),hl            ; DX = cell 0 + 479
+	or a
+	sbc hl,de
+	ld (cmdblk+0),hl            ; SX = DX - 12k
+	ld a,4
+	jr rc_cmd
+rc_left:
+	ld (cmdblk+4),hl            ; DX = cell 0
+	add hl,de
+	ld (cmdblk+0),hl            ; SX = cell 0 + 12|k|
+	xor a
+rc_cmd:
+	ld (cmdblk+12),a            ; ARG
+	ld a,$0C
+	ld (cmdblk+13),a
+	ld a,$FF
+	ld (cmdblk+14),a
+	ld (cmdblk+15),a
+	ld a,$40                    ; LMMM
+	ld (cmdblk+20),a
+	call v_send_cmd
+	; shadow: 10 bytes per cell
+	pop de                      ; D = k
+	ld a,d
+	bit 7,a
+	jr z,rc_sr
+	neg
+	ld d,a
+	call rc_len                 ; BC = (40-|k|)*10, DE = |k|*10
+	ld hl,(row_shad)
+	push hl
+	add hl,de
+	pop de
+	ldir                        ; left: entry c = entry c+|k|
+	or 1
+	ret
+rc_sr:
+	call rc_len
+	ld hl,(row_shad)
+	push hl
+	push de
+	ld de,399
+	add hl,de
+	pop de
+	ex de,hl                    ; DE = last byte, HL = |k|*10
+	pop hl
+	push de
+	add hl,bc
+	dec hl                      ; HL = row_shad + (40-k)*10 - 1
+	pop de
+	lddr                        ; right: entry c = entry c-k
+	or 1
+	ret
+rc_len:                         ; D = |k| -> DE = |k|*10, BC = 400 - DE
+	ld a,d
+	add a,a
+	ld e,a
+	add a,a
+	add a,a
+	add a,e
+	ld e,a
+	ld d,0
+	ld hl,400
+	or a
+	sbc hl,de
+	ld b,h
+	ld c,l
+	ret
+
+; D = k: Z if probe columns 10, 20, 30 equal their shadow entries at c-k
+rc_try:
+	ld c,10
+	call rc_t1
+	ret nz
+	ld c,20
+	call rc_t1
+	ret nz
+	ld c,30
+rc_t1:
+	push de
+	push bc
+	ld a,c
+	sub d
+	ld c,a
+	call shadow_ptr
+	push hl
+	pop iy
+	pop bc
+	push bc
+	call rc_cmp
+	pop bc
+	pop de
+	ret
+
+; C = column, IY = shadow entry: Z if the cell's inputs equal it
+rc_cmp:
+	ld b,0
+	ld hl,(row_scr)
+	add hl,bc
+	ld a,(hl)
+	cp (iy+0)
+	ret nz
+	ld e,a
+	ld hl,(row_cram)
+	add hl,bc
+	ld a,(hl)
+	and $0F
+	cp (iy+1)
+	ret nz
+	ld a,(row_mode)
+	bit 1,a
+	ld l,c                      ; bitmap: 8 bytes per column
+	jr nz,rc_b
+	ld l,e                      ; text: 8 bytes per character
+rc_b:
+	ld h,0
+	add hl,hl
+	add hl,hl
+	add hl,hl
+	ld de,(row_data)
+	add hl,de
+	push iy
+	pop de
+	inc de
+	inc de
+	ld b,8
+rc_l:
+	ld a,(de)
+	cp (hl)
+	ret nz
+	inc hl
+	inc de
+	djnz rc_l
+	ret
 
 ; candidate cells are compared with what was drawn last (SHADOW)
 rd_cells:
@@ -878,12 +1137,9 @@ rd_cells:
 	bit 1,a
 	jp nz,rdc_loop_b
 	ld ix,celldirty             ; text mode never uses IX for bitmap data
-rdc_loop_t:
+rdc_loop_t:                     ; group start (C = 0, 8 .. 32), B = any dirty
 	ld a,c
-	and 7
-	jr nz,rdc_ng                ; screen/colour-changed flag: once per 8 cells
-	push hl
-	ld a,c
+	ld (rdc_gs),a
 	rrca
 	rrca
 	rrca
@@ -892,161 +1148,6 @@ rdc_loop_t:
 	ld h,rd_sgrp/256
 	ld a,(hl)
 	ld (rdc_gf),a
-	pop hl
-	; nothing changed in the group's screen/colour and no character changed:
-	; all 8 cells are clean
-	push hl
-	ld hl,any_chd
-	or (hl)
-	pop hl
-	jr z,rdc_skip_t
-rdc_ng:
-	ld a,(rdc_gf)
-	or a
-	jr nz,rdc_cand_t
-	push hl
-	ld l,(hl)
-	ld h,CHDIRTY/256
-	ld a,(hl)
-	pop hl
-	or a
-	jp z,rdc_clean_t
-rdc_cand_t:
-	ld a,(hl)
-	cp (iy+0)
-	jp nz,rdc_dirty_t
-	ld a,(de)
-	and $0F
-	cp (iy+1)
-	jp nz,rdc_dirty_t
-	; same character and colour: its 8 bytes only matter if they changed
-	push hl
-	ld l,(hl)
-	ld h,CHDIRTY/256
-	ld a,(hl)
-	pop hl
-	or a
-	jp z,rdc_clean_t
-	; text: compare the character's 8 bytes
-	push hl
-	push de
-	push bc
-	ld l,(hl)
-	ld h,0
-	add hl,hl
-	add hl,hl
-	add hl,hl
-	ld de,(row_data)
-	add hl,de
-	push iy
-	pop de
-	inc de
-	inc de
-	ld b,8
-rdc_tl:
-	ld a,(de)
-	cp (hl)
-	jr nz,rdc_tdiff
-	inc hl
-	inc de
-	djnz rdc_tl
-	pop bc
-	pop de
-	pop hl
-	jp rdc_clean_t
-rdc_tdiff:
-	pop bc
-	pop de
-	pop hl
-	jp rdc_dirty_t
-rdc_clean_t:
-	xor a
-	jr rdc_store_t
-rdc_dirty_t:
-	ld b,1
-	ld a,1
-rdc_store_t:
-	ld (ix+0),a
-	inc ix
-	inc hl
-	inc de
-	push de
-	ld de,10
-	add iy,de
-	pop de
-	inc c
-	ld a,c
-	cp 40
-	jp nz,rdc_loop_t
-	ld a,b
-	or a
-	ret
-rdc_skip_t:                     ; 8 clean cells
-	xor a
-	ld (ix+0),a
-	ld (ix+1),a
-	ld (ix+2),a
-	ld (ix+3),a
-	ld (ix+4),a
-	ld (ix+5),a
-	ld (ix+6),a
-	ld (ix+7),a
-	push bc
-	ld bc,8
-	add ix,bc
-	add hl,bc
-	ex de,hl
-	add hl,bc
-	ex de,hl
-	ld bc,80
-	add iy,bc
-	pop bc
-	ld a,c
-	add a,8
-	ld c,a
-	cp 40
-	jp nz,rdc_loop_t
-	ld a,b
-	or a
-	ret
-rdc_loop_b:
-	ld a,c
-	and 7
-	jr nz,rdc_bn
-	; group start: screen/colour-changed flag and the bitmap dirty bits
-	push hl
-	ld a,c
-	rrca
-	rrca
-	rrca
-	and $1F
-	push af
-	add a,rd_sgrp & 255
-	ld l,a
-	ld h,rd_sgrp/256
-	ld a,(hl)
-	ld (rdc_gf),a
-	pop af
-	add a,rd_grp & 255
-	ld l,a
-	ld h,rd_grp/256
-	ld a,(hl)
-	ld (rdc_bg),a
-	ld hl,rdc_gf
-	or (hl)
-	pop hl
-	jp z,rdc_skip_b             ; all 8 cells clean
-rdc_bn:
-	ld a,(rdc_bg)
-	srl a                       ; bit 0 = this cell (bittab order)
-	ld (rdc_bg),a
-	jr c,rdc_cand_b
-	ld a,(rdc_gf)
-	or a
-	jr nz,rdc_cand_b
-	jp rdc_clean_b
-rdc_skip_b:                     ; 8 clean cells
-	push hl
 	ld a,c
 	add a,celldirty & 255
 	ld l,a
@@ -1067,19 +1168,223 @@ rdc_skip_b:                     ; 8 clean cells
 	ld (hl),a
 	inc l
 	ld (hl),a
+	ld a,(rdc_gf)
+	or a
+	jr nz,rdt_all
+	ld a,(any_chd)
+	or a
+	jr z,rdt_gend               ; no character changed: all 8 clean
+	; screen and colour unchanged: only cells showing a changed character
+	ld hl,(row_scr)
+	ld e,c
+	ld d,0
+	add hl,de
+rdt_cl:
+	ld a,(hl)
+	push hl
+	ld l,a
+	ld h,CHDIRTY/256
+	ld a,(hl)
+	or a
+	call nz,rdt_one
 	pop hl
-	push bc
-	ld bc,8
-	add hl,bc
-	ex de,hl
-	add hl,bc
-	ex de,hl
-	ld bc,80
-	add iy,bc
-	ld bc,64
-	add ix,bc
-	pop bc
+	inc hl
+	inc c
 	ld a,c
+	and 7
+	jr nz,rdt_cl
+	jr rdt_next
+rdt_all:                        ; screen or colour changed: all 8 are candidates
+	push bc
+	ld b,0
+	ld l,c
+	ld h,b
+	add hl,hl
+	push hl
+	add hl,hl
+	add hl,hl
+	pop de
+	add hl,de                   ; 10c
+	ld de,(row_shad)
+	add hl,de
+	push hl
+	pop iy
+	ld hl,(row_cram)
+	add hl,bc
+	ex de,hl                    ; DE = colour RAM
+	ld hl,(row_scr)
+	add hl,bc                   ; HL = screen
+	pop bc
+rdt_al:
+	ld a,(hl)
+	cp (iy+0)
+	jr nz,rdt_ad
+	ld a,(de)
+	and $0F
+	cp (iy+1)
+	jr nz,rdt_ad
+	push hl
+	ld l,(hl)
+	ld h,CHDIRTY/256
+	ld a,(hl)
+	pop hl
+	or a
+	jr z,rdt_an                 ; same character, unchanged bytes
+	push hl
+	push de
+	call rdt_one                ; changed character: compare its bytes
+	pop de
+	pop hl
+	jr rdt_an
+rdt_ad:
+	ld b,1
+	push hl
+	ld a,c
+	add a,celldirty & 255
+	ld l,a
+	ld h,celldirty/256
+	ld (hl),1
+	pop hl
+rdt_an:
+	inc hl
+	inc de
+	push de
+	ld de,10
+	add iy,de
+	pop de
+	inc c
+	ld a,c
+	and 7
+	jr nz,rdt_al
+	jr rdt_next
+rdt_gend:
+	ld a,c
+	add a,8
+	ld c,a
+rdt_next:
+	ld a,c
+	cp 40
+	jp nz,rdc_loop_t
+	ld a,b
+	or a
+	ret
+
+; text cell C vs its shadow: mark it in celldirty and B when it differs (C kept)
+rdt_one:
+	push bc
+	ld b,0
+	ld hl,(row_scr)
+	add hl,bc
+	ld e,(hl)                   ; character
+	ld hl,(row_cram)
+	add hl,bc
+	ld a,(hl)
+	and $0F
+	ld d,a                      ; colour
+	ld l,c
+	ld h,b
+	add hl,hl
+	push hl
+	add hl,hl
+	add hl,hl
+	pop bc
+	add hl,bc                   ; 10c
+	ld bc,(row_shad)
+	add hl,bc
+	ld a,e
+	cp (hl)
+	jr nz,rdt_d
+	inc hl
+	ld a,d
+	cp (hl)
+	jr nz,rdt_d
+	inc hl
+	; same character and colour: its 8 bytes only matter if they changed
+	ld c,e
+	ld b,CHDIRTY/256
+	ld a,(bc)
+	or a
+	jr z,rdt_s
+	ex de,hl                    ; DE = shadow bytes
+	ld l,c
+	ld h,0
+	add hl,hl
+	add hl,hl
+	add hl,hl
+	ld bc,(row_data)
+	add hl,bc
+	ld b,8
+rdt_l:
+	ld a,(de)
+	cp (hl)
+	jr nz,rdt_d
+	inc hl
+	inc de
+	djnz rdt_l
+rdt_s:
+	pop bc
+	ret
+rdt_d:
+	pop bc
+	ld b,1
+	ld a,c
+	add a,celldirty & 255
+	ld l,a
+	ld h,celldirty/256
+	ld (hl),1
+	ret
+rdc_loop_b:                     ; group start (C = 0, 8 .. 32), B = any dirty
+	ld a,c
+	ld (rdc_gs),a
+	rrca
+	rrca
+	rrca
+	ld e,a
+	ld d,0
+	ld hl,rd_sgrp
+	add hl,de
+	ld a,(hl)
+	ld (rdc_gf),a
+	ld hl,rd_grp
+	add hl,de
+	ld a,(hl)
+	ld (rdc_bg),a
+	ld a,c
+	add a,celldirty & 255
+	ld l,a
+	ld h,celldirty/256
+	xor a
+	ld (hl),a
+	inc l
+	ld (hl),a
+	inc l
+	ld (hl),a
+	inc l
+	ld (hl),a
+	inc l
+	ld (hl),a
+	inc l
+	ld (hl),a
+	inc l
+	ld (hl),a
+	inc l
+	ld (hl),a
+	ld a,(rdc_gf)
+	or a
+	jr nz,rdb_all
+	; screen and colour unchanged: only cells whose bitmap bytes were
+	; written can differ, visit just those
+rdb_bit:
+	ld a,(rdc_bg)
+	or a
+	jr z,rdb_gend
+	srl a
+	ld (rdc_bg),a
+	call c,rdb_one
+	inc c
+	jr rdb_bit
+rdb_gend:
+	ld a,(rdc_gs)
 	add a,8
 	ld c,a
 	cp 40
@@ -1087,48 +1392,158 @@ rdc_skip_b:                     ; 8 clean cells
 	ld a,b
 	or a
 	ret
-rdc_cand_b:
+rdb_all:                        ; screen or colour changed: all 8 are candidates
+	call rdb_ptrs
+rdb_al:
+	call rdb_cmp
+	or a
+	jr z,rdb_ac
+	ld b,1
+	push hl
+	ld a,c
+	add a,celldirty & 255
+	ld l,a
+	ld h,celldirty/256
+	ld (hl),1
+	pop hl
+rdb_ac:
+	inc hl
+	inc de
+	push de
+	ld de,10
+	add iy,de
+	ld de,8
+	add ix,de
+	pop de
+	inc c
+	ld a,c
+	and 7
+	jr nz,rdb_al
+	ld a,c
+	cp 40
+	jp nz,rdc_loop_b
+	ld a,b
+	or a
+	ret
+
+; cell C: compare, mark it in celldirty and B when it differs (C kept).
+; Bitmap bytes first: if they differ the cell is dirty whatever the colours.
+rdb_one:
+	push bc
+	ld b,0
+	ld l,c
+	ld h,b
+	add hl,hl
+	ld d,h
+	ld e,l                      ; 2c
+	add hl,hl
+	add hl,hl                   ; 8c
+	push hl
+	add hl,de
+	ld de,(row_shad)
+	add hl,de
+	ex de,hl                    ; DE = shadow entry
+	pop hl
+	ld bc,(row_data)
+	add hl,bc                   ; HL = bitmap bytes
+	inc de
+	inc de
+	ld b,8
+rbo_l:
+	ld a,(de)
+	cp (hl)
+	jr nz,rbo_dirty
+	inc hl
+	inc de
+	djnz rbo_l
+	pop bc
+	push bc
+	call rdb_ptrs               ; same bytes: the colours decide
+	call rdb_cmp
+	pop bc
+	or a
+	ret z
+	jr rbo_mark
+rbo_dirty:
+	pop bc
+rbo_mark:
+	ld b,1
+	ld a,c
+	add a,celldirty & 255
+	ld l,a
+	ld h,celldirty/256
+	ld (hl),1
+	ret
+
+; C = column -> HL screen, DE colour RAM, IX bitmap bytes, IY shadow (BC kept)
+rdb_ptrs:
+	push bc
+	ld b,0
+	ld l,c
+	ld h,b
+	add hl,hl
+	ld d,h
+	ld e,l                      ; 2c
+	add hl,hl
+	add hl,hl                   ; 8c
+	push hl
+	add hl,de                   ; 10c
+	ld de,(row_shad)
+	add hl,de
+	push hl
+	pop iy
+	pop hl
+	ld de,(row_data)
+	add hl,de
+	push hl
+	pop ix
+	ld hl,(row_cram)
+	add hl,bc
+	ex de,hl
+	ld hl,(row_scr)
+	add hl,bc
+	pop bc
+	ret
+
+; cell at HL/DE/IX vs its shadow IY: A = 1 differs, 0 same (pointers kept)
+rdb_cmp:
 	ld a,(hl)
 	cp (iy+0)
-	jp nz,rdc_cdiff
+	jr nz,rdb_cdiff
 	ld a,(de)
 	and $0F
 	cp (iy+1)
-	jp nz,rdc_cdiff
-rdc_bytes:
+	jr nz,rdb_cdiff
 	ld a,(ix+0)
 	cp (iy+2)
-	jp nz,rdc_dirty_b
+	jr nz,rdb_d
 	ld a,(ix+1)
 	cp (iy+3)
-	jp nz,rdc_dirty_b
+	jr nz,rdb_d
 	ld a,(ix+2)
 	cp (iy+4)
-	jp nz,rdc_dirty_b
+	jr nz,rdb_d
 	ld a,(ix+3)
 	cp (iy+5)
-	jp nz,rdc_dirty_b
+	jr nz,rdb_d
 	ld a,(ix+4)
 	cp (iy+6)
-	jp nz,rdc_dirty_b
+	jr nz,rdb_d
 	ld a,(ix+5)
 	cp (iy+7)
-	jp nz,rdc_dirty_b
+	jr nz,rdb_d
 	ld a,(ix+6)
 	cp (iy+8)
-	jp nz,rdc_dirty_b
+	jr nz,rdb_d
 	ld a,(ix+7)
 	cp (iy+9)
-	jp nz,rdc_dirty_b
-rdc_clean_b:
+	jr nz,rdb_d
 	xor a
-	jr rdc_store_b
-rdc_cdiff:
-	; screen/colour RAM changed.  A multicolour cell whose 8 bytes are 0 (now
-	; and as drawn) shows only $D021: take the new colours without a redraw
+	ret
+rdb_cdiff:                      ; colours differ: same only for an all-$00 multicolour cell
 	ld a,(row_mode)
 	rrca
-	jp nc,rdc_dirty_b
+	jr nc,rdb_d
 	ld a,(ix+0)
 	or (ix+1)
 	or (ix+2)
@@ -1145,40 +1560,16 @@ rdc_cdiff:
 	or (iy+7)
 	or (iy+8)
 	or (iy+9)
-	jp nz,rdc_dirty_b
+	jr nz,rdb_d
 	ld a,(hl)
 	ld (iy+0),a
 	ld a,(de)
 	and $0F
 	ld (iy+1),a
-	jr rdc_clean_b
-rdc_dirty_b:
-	ld b,1
+	xor a
+	ret
+rdb_d:
 	ld a,1
-rdc_store_b:
-	push hl
-	push af
-	ld a,c
-	add a,celldirty & 255
-	ld l,a
-	ld h,celldirty/256
-	pop af
-	ld (hl),a
-	pop hl
-	inc hl
-	inc de
-	push de
-	ld de,10
-	add iy,de
-	ld de,8
-	add ix,de
-	pop de
-	inc c
-	ld a,c
-	cp 40
-	jp nz,rdc_loop_b
-	ld a,b
-	or a
 	ret
 
 ; 5 group flags (8 bytes each) for offsets HL..HL+39 -> (DE)..(DE+4)
@@ -1347,42 +1738,30 @@ row_render:
 	ld a,(row_mode)
 	bit 2,a
 	jp nz,row_blank
-	ld c,0
-rrn_scan:
-	ld a,c
+	ld hl,celldirty
+rrn_scan:                       ; next dirty cell (sentinel $80 after cell 39)
+	ld a,(hl)
+	inc l
+	or a
+	jr z,rrn_scan
+	dec l
+	ld a,l
+	sub celldirty & 255
 	cp 40
 	ret nc
-	ld hl,celldirty
-	add a,l
-	ld l,a
-	jr nc,rrn1
-	inc h
-rrn1:
-	ld a,(hl)
-	or a
-	jr nz,rrn_start
-	inc c
-	jr rrn_scan
-rrn_start:
-	ld a,c
 	ld (run_start),a
 	ld b,0
-rrn_len:
+rrn_len:                        ; run of 1s (0 or the sentinel ends it)
 	inc b
-	inc c
-	inc hl
-	ld a,c
-	cp 40
-	jr nc,rrn_have
+	inc l
 	ld a,(hl)
-	or a
-	jr nz,rrn_len
-rrn_have:
+	dec a
+	jr z,rrn_len
 	ld a,b
 	ld (run_len),a
-	push bc
+	push hl
 	call draw_run
-	pop bc
+	pop hl
 	jr rrn_scan
 
 row_blank:
@@ -1503,7 +1882,9 @@ dr_cell:
 	call shadow_store
 	pop hl
 	push hl
-	call nt_build
+	ld a,(cc_hit)
+	or a
+	call z,nt_build             ; rows phase: only dr_cell builds NT
 	pop hl
 	call cell_uniform
 	jr nz,dr_pix
@@ -1534,6 +1915,10 @@ dr_pix:
 	push hl
 	call dr_flush
 	pop hl
+	ld a,(cell_cols)
+	or a
+	call nz,dr_two              ; multicolour with 2 pixel values: CMMC, CF
+	jr c,dr_adv
 	ld a,(dr_full)
 	or a
 	jr z,dr_next
@@ -1545,25 +1930,25 @@ dr_pix:
 	jr dr_out
 dr_next:                        ; later cells: resend only DX/DY/NX/NY (R#36-R#43;
 	call v_wait                 ; the command updates them) and the opcode
-	call k_get_iff
-	push hl
+	ld a,i                      ; P/V = IFF2 (read twice, as k_get_iff)
+	jp pe,dn_on
+	ld a,i
+dn_on:
 	push af
 	di
+	push hl
 	ld a,36
 	out (V_SEL),a
 	ld hl,cmdblk+4
 	ld bc,8*256+V_REG
 	otir
-	pop af
-	ld c,a
 	pop hl
 	ld a,52
 	out (V_SEL),a
 	ld a,$10                    ; LMMC
 	out (V_REG),a
-	ld a,c
-	or a
-	jr z,dr_out
+	pop af
+	jp po,dr_out
 	ei
 dr_out:
 	call cell_out
@@ -1578,6 +1963,293 @@ dr_adv:
 	jp nz,dr_cell
 	call dr_flush
 	jp csel_fix
+
+; HL = 8 source bytes of a multicolour cell.  Exactly 2 pixel values: draw it
+; with CMMC (12 data bytes instead of LMMC's 48), CF.  Otherwise NC, HL kept.
+dr_two:
+	push hl
+	ld d,CM_PT/256
+	ld c,0
+	ld e,(hl)
+	inc hl
+	ld a,(de)
+	or c
+	ld c,a
+	ld e,(hl)
+	inc hl
+	ld a,(de)
+	or c
+	ld c,a
+	ld e,(hl)
+	inc hl
+	ld a,(de)
+	or c
+	ld c,a
+	ld e,(hl)
+	inc hl
+	ld a,(de)
+	or c
+	ld c,a
+	ld e,(hl)
+	inc hl
+	ld a,(de)
+	or c
+	ld c,a
+	ld e,(hl)
+	inc hl
+	ld a,(de)
+	or c
+	ld c,a
+	ld e,(hl)
+	inc hl
+	ld a,(de)
+	or c
+	ld c,a
+	ld e,(hl)
+	inc hl
+	ld a,(de)
+	or c
+	ld c,a
+	ld hl,cm_pv
+	ld e,c
+	ld d,0
+	add hl,de
+	ld a,(hl)
+	or a                        ; NC
+	jr nz,dt_go
+	pop hl
+	ret
+dt_go:                          ; A = $80 | fg << 2 | bg
+	ld b,a
+	and 3
+	add a,a
+	ld e,a
+	ld hl,ntq+1
+	add hl,de
+	ld a,(hl)
+	ld (cm_bc),a
+	ld a,b
+	rrca
+	rrca
+	and 3
+	ld c,a
+	add a,a
+	ld e,a
+	ld hl,ntq+1
+	add hl,de
+	ld a,(hl)
+	ld (cm_fc),a
+	ld e,c
+	ld hl,cm_x55
+	add hl,de
+	ld a,(hl)
+	ld (cm_x),a
+	call v_wait
+	ld a,i                      ; P/V = IFF2 (read twice, as k_get_iff)
+	jp pe,dt_on
+	ld a,i
+dt_on:
+	push af
+	di
+	ld a,36
+	out (V_SEL),a
+	ld hl,cmdblk+4
+	ld bc,8*256+V_REG
+	otir                        ; DX, DY, NX, NY
+	xor a
+	out (V_REG),a               ; R#44 ARG
+	ld a,$0C
+	out (V_REG),a               ; R#45 LOP: WC = SC (no transparency)
+	ld a,48
+	out (V_SEL),a
+	ld a,(cm_fc)
+	out (V_REG),a
+	out (V_REG),a               ; R#48/49 foreground
+	ld a,(cm_bc)
+	out (V_REG),a
+	out (V_REG),a               ; R#50/51 background
+	ld a,52
+	out (V_SEL),a
+	ld a,$50                    ; CMMC
+	out (V_REG),a
+	pop af
+	jp po,dt_di
+	ei
+dt_di:
+	pop de                      ; source
+	ld a,(cm_x)
+	ld c,a
+	ld a,(de)
+	inc de
+	xor c
+	ld l,a
+	ld h,CM_TA/256
+	ld a,(hl)
+	out (V_CMD),a
+	inc h
+	ld b,(hl)
+	ld a,(de)
+	inc de
+	xor c
+	ld l,a
+	inc h
+	ld a,(hl)
+	or b
+	out (V_CMD),a
+	inc h
+	ld a,(hl)
+	out (V_CMD),a
+	ld a,(de)
+	inc de
+	xor c
+	ld l,a
+	ld h,CM_TA/256
+	ld a,(hl)
+	out (V_CMD),a
+	inc h
+	ld b,(hl)
+	ld a,(de)
+	inc de
+	xor c
+	ld l,a
+	inc h
+	ld a,(hl)
+	or b
+	out (V_CMD),a
+	inc h
+	ld a,(hl)
+	out (V_CMD),a
+	ld a,(de)
+	inc de
+	xor c
+	ld l,a
+	ld h,CM_TA/256
+	ld a,(hl)
+	out (V_CMD),a
+	inc h
+	ld b,(hl)
+	ld a,(de)
+	inc de
+	xor c
+	ld l,a
+	inc h
+	ld a,(hl)
+	or b
+	out (V_CMD),a
+	inc h
+	ld a,(hl)
+	out (V_CMD),a
+	ld a,(de)
+	inc de
+	xor c
+	ld l,a
+	ld h,CM_TA/256
+	ld a,(hl)
+	out (V_CMD),a
+	inc h
+	ld b,(hl)
+	ld a,(de)
+	inc de
+	xor c
+	ld l,a
+	inc h
+	ld a,(hl)
+	or b
+	out (V_CMD),a
+	inc h
+	ld a,(hl)
+	out (V_CMD),a
+	scf
+	ret
+
+cm_x55:
+	db $00,$55,$AA,$FF
+cm_pv:                          ; value mask -> $80 | fg << 2 | bg, 0 unless 2 values
+	db 0,0,0,$84,0,$88,$89,0
+	db 0,$8C,$8D,0,$8E,0,0,0
+
+; build the CMMC tables (once)
+cm_init:
+	ld bc,0                     ; C = byte
+cmi_l:
+	; presence mask
+	ld a,c
+	ld e,0
+	ld b,4
+cmi_p:
+	push af
+	and 3
+	ld hl,cm_bit
+	add a,l
+	ld l,a
+	jr nc,cmi_p1
+	inc h
+cmi_p1:
+	ld a,(hl)
+	or e
+	ld e,a
+	pop af
+	rrca
+	rrca
+	djnz cmi_p
+	ld h,CM_PT/256
+	ld l,c
+	ld (hl),e
+	; 12-bit pattern in DE: pixel 00 -> 111
+	ld de,0
+	ld a,c
+	ld b,4
+cmi_b:
+	ex de,hl
+	add hl,hl
+	add hl,hl
+	add hl,hl
+	ex de,hl
+	rlca
+	rlca
+	push af
+	and 3
+	jr nz,cmi_b0
+	ld a,e
+	or 7
+	ld e,a
+cmi_b0:
+	pop af
+	djnz cmi_b
+	; DE = bits 11-0
+	ld l,c
+	ld h,CM_TD/256
+	ld (hl),e
+	ld h,CM_TC/256
+	ld (hl),d
+	ld a,e
+	and $0F
+	rlca
+	rlca
+	rlca
+	rlca
+	ld h,CM_TB/256
+	ld (hl),a
+	ld a,e
+	rrca
+	rrca
+	rrca
+	rrca
+	and $0F
+	ld b,a
+	ld a,d
+	rlca
+	rlca
+	rlca
+	rlca
+	or b
+	ld h,CM_TA/256
+	ld (hl),a
+	inc c
+	jr nz,cmi_l
+	ret
+cm_bit:
+	db 1,2,4,8
 
 ; send the pending merged one-colour fill (pf_n cells from pf_dx)
 dr_flush:
@@ -1649,12 +2321,52 @@ cell_colours:
 	ld a,(hl)
 	and $0F
 	ld (spr_tmp),a              ; colour RAM nibble
+	ld e,a
 	; screen byte
 	ld hl,(row_scr)
 	add hl,bc
 	ld a,(hl)
 	ld (spr_tmp+1),a
+	ld d,a
+	; same inputs as the last cell: cell_cols is still right (palette
+	; slots are never freed), only the source pointer is needed
+	ld hl,cc_key
 	ld a,(row_mode)
+	cp (hl)
+	jr nz,cc_new
+	inc l
+	ld a,e
+	cp (hl)
+	jr nz,cc_new
+	inc l
+	ld a,d
+	cp (hl)
+	jr nz,cc_new
+	ld a,(row_mode)
+	bit 1,a
+	ld l,c                      ; bitmap: 8 bytes per column
+	jr nz,cc_src
+	ld l,d                      ; text: 8 bytes per character
+cc_src:
+	ld h,0
+	add hl,hl
+	add hl,hl
+	add hl,hl
+	ld de,(row_data)
+	add hl,de
+	ld a,1
+	ld (cc_hit),a
+	ret
+cc_new:
+	xor a
+	ld (cc_hit),a
+	ld hl,cc_key
+	ld a,(row_mode)
+	ld (hl),a
+	inc l
+	ld (hl),e
+	inc l
+	ld (hl),d
 	bit 1,a
 	jr nz,cc_bitmap
 	; text mode: char data = charbase + code*8
@@ -1929,16 +2641,6 @@ ntb_row:                        ; A = colour a -> the 4 entries a,0..a,3 at HL (
 	inc de
 	ld (hl),a
 	inc l
-	ld (hl),b
-	inc l
-	ld a,(de)
-	inc de
-	or c
-	ld (hl),a
-	inc l
-	ld a,(de)
-	inc de
-	ld (hl),a
 	inc l
 	ld (hl),b
 	inc l
@@ -1951,6 +2653,7 @@ ntb_row:                        ; A = colour a -> the 4 entries a,0..a,3 at HL (
 	inc de
 	ld (hl),a
 	inc l
+	inc l
 	ld (hl),b
 	inc l
 	ld a,(de)
@@ -1961,6 +2664,19 @@ ntb_row:                        ; A = colour a -> the 4 entries a,0..a,3 at HL (
 	ld a,(de)
 	inc de
 	ld (hl),a
+	inc l
+	inc l
+	ld (hl),b
+	inc l
+	ld a,(de)
+	inc de
+	or c
+	ld (hl),a
+	inc l
+	ld a,(de)
+	inc de
+	ld (hl),a
+	inc l
 	inc l
 	ret
 ntb_hires:
@@ -2012,6 +2728,7 @@ ntb_h:
 	or b
 	ld (hl),a                   ; h2|h3, h3
 	inc l
+	inc l
 	inc c
 	ld a,c
 	cp 16
@@ -2056,9 +2773,8 @@ cu_no:
 	pop hl
 	ret
 cu_ent:                         ; A = nibble -> DE = its NT entry
-	ld e,a
 	add a,a
-	add a,e
+	add a,a
 	ld e,a
 	ld d,NT/256
 	ret
@@ -2077,44 +2793,28 @@ cu_chk3:                        ; Z if the 3 bytes at DE all equal B
 
 ; HL = 8 source bytes -> 8 lines of 6 bytes to the LMMC data port (NT page aligned)
 cell_out:
-	ld b,8
-	ld d,NT/256
+	ex de,hl                    ; DE = source
+	ld h,NT/256
+	ld bc,48*256+V_CMD          ; B counts the 48 bytes sent by OUTI
 co_line:
-	ld a,(hl)
-	inc hl
-	ld c,a
+	ld a,(de)
+	and $F0
 	rrca
 	rrca
-	rrca
-	rrca
+	ld l,a
+	outi
+	outi
+	outi
+	ld a,(de)
+	inc de
 	and $0F
-	ld e,a
 	add a,a
-	add a,e
-	ld e,a
-	ld a,(de)
-	out (V_CMD),a
-	inc e
-	ld a,(de)
-	out (V_CMD),a
-	inc e
-	ld a,(de)
-	out (V_CMD),a
-	ld a,c
-	and $0F
-	ld e,a
 	add a,a
-	add a,e
-	ld e,a
-	ld a,(de)
-	out (V_CMD),a
-	inc e
-	ld a,(de)
-	out (V_CMD),a
-	inc e
-	ld a,(de)
-	out (V_CMD),a
-	djnz co_line
+	ld l,a
+	outi
+	outi
+	outi
+	jr nz,co_line
 	ret
 
 ; ============================================================================
@@ -2436,6 +3136,7 @@ sp_h0:
 	pop bc
 	call sync_rows
 sp_erased:
+	call sp_live
 	xor a
 	ld (spr_n),a
 	ld (coll_acc),a
@@ -2701,6 +3402,72 @@ spo_hok:
 
 ; --- sprite-sprite collision on tight bounding boxes --------------------------
 ; this sprite: IX entry (x,y,w,h) + bbox from the cache slot in spr_tmp+10..13
+; Race display (all 8 sprites from the L1486 tables, L1452): the player's car
+; is sprites 0/1, which the 50 Hz raster IRQ moves (LB781) even while we
+; render.  Draw them at their current shadow position instead of the frame's:
+; the car (position and frame) then shows ~3 fields fresher.
+sp_live:
+	ld a,($02E9)
+	or a
+	ret nz
+	ld a,i                      ; P/V = IFF2 (read twice, as k_get_iff)
+	jp pe,spl_on
+	ld a,i
+spl_on:
+	push af
+	di
+	ld a,SEG_C3
+	out (PORT_P3),a
+	ld a,($CFEC)
+	ld c,a
+	ld a,SEG_SHADOW
+	out (PORT_P3),a
+	pop af
+	jp po,spl_di
+	ei
+spl_di:
+	ld a,c
+	or a
+	ret nz                      ; upper zone from L132F: not the race layout
+	ld a,(ltl_count)
+	inc a
+	ld b,a                      ; base record + events
+	ld hl,LTL+8                 ; VIC registers of the record
+	ld de,TL_REC-$10
+spl_l:
+	ld a,($1486)
+	ld (hl),a                   ; sprite 0 X
+	inc l
+	ld a,($148E)
+	ld (hl),a                   ; sprite 0 Y
+	inc l
+	ld a,($1487)
+	ld (hl),a                   ; sprite 1 X
+	inc l
+	ld a,($148F)
+	ld (hl),a                   ; sprite 1 Y
+	ld a,l
+	add a,$10-3
+	ld l,a
+	ld a,($02E5)
+	xor (hl)
+	and 3
+	xor (hl)
+	ld (hl),a                   ; X bit 8 of sprites 0/1
+	push hl
+	ld a,l
+	add a,$20
+	ld l,a                      ; record + $38: sprite pointers
+	ld a,($1496)
+	ld (hl),a
+	inc l
+	ld a,($1497)
+	ld (hl),a
+	pop hl
+	add hl,de
+	djnz spl_l
+	ret
+
 sp_coll:
 	ld a,(rgn_idx)
 	ld (ix+6),a
@@ -3071,23 +3838,17 @@ spr_dr:
 	ld a,(ix+0)
 	inc ix
 	ld d,a
+	and $F0
 	rrca
 	rrca
-	rrca
-	rrca
-	and $0F
-	ld l,a
-	add a,a
-	add a,l
 	ld l,a
 	outi
 	outi
 	outi
 	ld a,d
 	and $0F
-	ld l,a
 	add a,a
-	add a,l
+	add a,a
 	ld l,a
 	outi
 	outi
@@ -3095,23 +3856,17 @@ spr_dr:
 	ld a,(ix+0)
 	inc ix
 	ld d,a
+	and $F0
 	rrca
 	rrca
-	rrca
-	rrca
-	and $0F
-	ld l,a
-	add a,a
-	add a,l
 	ld l,a
 	outi
 	outi
 	outi
 	ld a,d
 	and $0F
-	ld l,a
 	add a,a
-	add a,l
+	add a,a
 	ld l,a
 	outi
 	outi
@@ -3119,23 +3874,17 @@ spr_dr:
 	ld a,(ix+0)
 	inc ix
 	ld d,a
+	and $F0
 	rrca
 	rrca
-	rrca
-	rrca
-	and $0F
-	ld l,a
-	add a,a
-	add a,l
 	ld l,a
 	outi
 	outi
 	outi
 	ld a,d
 	and $0F
-	ld l,a
 	add a,a
-	add a,l
+	add a,a
 	ld l,a
 	outi
 	outi
@@ -3225,9 +3974,8 @@ spr_send:
 ; nibble A (low 4 bits) -> 3 bytes at IX
 spr_nib_n:
 	and $0F
-	ld l,a
 	add a,a
-	add a,l
+	add a,a
 	ld l,a
 	ld h,NT/256
 	ld a,(hl)
@@ -3245,9 +3993,8 @@ spr_nib_n:
 ; nibble A (low 4 bits) -> 6 bytes at IX (x-expanded)
 spr_nib_x:
 	and $0F
-	ld l,a
 	add a,a
-	add a,l
+	add a,a
 	ld l,a
 	ld h,NT/256
 	ld e,3

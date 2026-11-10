@@ -57,11 +57,17 @@ SPEC_RANGE = (0x289C, 0x3508)
 SPEC_OFS = 0x10000
 # address -> set of values it may hold (as seen by the copy)
 _NEG = frozenset(range(0x80, 0x100))
-SPEC_ASSUME = {0x0342: {0}, 0x02C9: {0}, 0x02D2: {0}, 0x02BC: {0}, 0x02B9: {0},
+SPEC_ASSUME = {0x0342: {0}, 0x02BC: {0}, 0x02B9: {0},
                0x2FE0: _NEG,                    # LFB2A (relocated, RELOC)
                0x0334: _NEG, 0x96E4: _NEG, 0x02CA: _NEG | {0}}
 VIC_PTR_CODE = VIC_PTR_CODE + ((SPEC_RANGE[0] + SPEC_OFS, SPEC_RANGE[1] + SPEC_OFS),)
 VIC_MAP_ENTRY = VIC_MAP_ENTRY | {SPEC_RANGE[0] + SPEC_OFS}
+# the specialized copy as hand-written Z80 (ROAD_NATIVE=0: translated copy;
+# =ab: no copy, native at NR_ab next to the original drawer, for test/road_ab.sh)
+ROAD_NATIVE = os.environ.get('ROAD_NATIVE', '1')
+SPEC_ON = ROAD_NATIVE != 'ab'
+if ROAD_NATIVE == '1':
+    NATIVE[SPEC_RANGE[0] + SPEC_OFS] = (SPEC_RANGE[1] + SPEC_OFS, 'n289c.asm')
 # C64 page-3 variables moved to page 0 (KVARS+$E0.., see defs.inc): only ever
 # accessed at their fixed address (no indexed or indirect access can reach
 # them), read between VIC-bank stores (no k_c2 needed for them)
@@ -71,6 +77,7 @@ RELOC_TAB = ((0xFEBB, 0xFEF0, 0x3008),)
 VIC_REGS_ADDR = 0x2F00         # defs.inc VIC_REGS
 MAIN_LOOP = 0x8003     # called once per race-loop pass: render once per pass
 MT_HEAD_VBLS = 50      # vblanks without a pass before raster polls drive renders again
+NO_RASTER_WAIT = {0x8014}  # 'cmp $D012 / bcs self' waits translated as already passed
 IO_FAST = (0xD011, 0xD012, 0xD016, 0xD019, 0xD021, 0xD022, 0xD023)   # handlers: iowf_XXXX in kernel_p2.asm
 SEG_CODE_FIRST = 8            # mapper segment number of the first code segment
 
@@ -127,7 +134,8 @@ class Translator:
                 if mode in ('abs', 'abx', 'aby') and lo <= v < hi:
                     assert mn in ('lda', 'ldx', 'ldy', 'cmp', 'adc', 'sbc', 'and', 'ora', 'eor'), '%04X writes table' % a
                     self.ins[a] = (op, mn, mode, v - lo + d, n)
-        self.specialize()
+        if SPEC_ON:
+            self.specialize()
         self.find_blocks()
         self.liveness()
         # JSR targets that end in an indirect jump are always called through
@@ -244,7 +252,7 @@ class Translator:
             s.append(a + n)
         if mode == 'rel' or (mn == 'jmp' and mode == 'abs'):
             s.append(v)
-        if a == SPEC_RANGE[0]:
+        if a == SPEC_RANGE[0] and SPEC_ON:
             s.append(a + SPEC_OFS)
         return s
 
@@ -625,6 +633,8 @@ class Gen:
             helper = 'k_vicw'
         if cls == 'io' and mode == 'abs' and v in IO_FAST:
             helper, setup = 'iowf_%04X' % v, []   # fixed hot VIC register: no address decode
+        elif cls == 'io' and 0xD800 <= v and (v if mode == 'abs' else v + 255) < 0xDC00:
+            helper = 'k_colwr'          # colour RAM for sure: skip k_iowr's decode
         # VIC bank surely mapped, flags dead: compare inline, call only to store
         if helper == 'k_vwrmf':
             body = ['set 7,h', 'set 6,h', 'cp (hl)', 'call nz,vwr_st']
@@ -698,13 +708,37 @@ class Gen:
                     if l and not l.lstrip().startswith(';'):
                         self.out.append(l)
             return
+        if ROAD_NATIVE == 'ab' and a == SPEC_RANGE[0]:
+            self.out.append('NR_ab:')
+            self.out.extend(l.rstrip() for l in open(os.path.join(NATIVE_DIR, 'n289c.asm'))
+                            if l.strip() and not l.lstrip().startswith(';'))
         self.out.append('%s:\t\t\t; %04X %s %s' % (L(a), a, text, mode))
         if a == MAIN_LOOP:
             # game-loop pass: its new state is worth one render (flags preserved)
-            self.emit('ld hl,mt_sync', 'ld (hl),1', 'ld hl,mt_head', 'ld (hl),%d' % MT_HEAD_VBLS)
+            # game-loop pass: hold passes to one per PACE_VBLS vblanks (steady game
+            # speed); its new state is worth one render (mt_sync), except a pass
+            # that started late after a rendered one: skip that render so the
+            # game catches up.  A far-behind schedule (menus, pauses) restarts.
+            # Registers and flags preserved.
+            # An early pass asks for its render before waiting for its slot: the
+            # render (vblank ISR) then overlaps the wait instead of following it.
+            p = L(a)
+            self.emit('push af', 'push hl', 'ld hl,pace_due',
+                      'ld a,(frame_count)', 'sub (hl)', 'jp p,%s_pl' % p,
+                      'ld a,%d' % MT_HEAD_VBLS, 'ld (mt_head),a',
+                      'xor a', 'ld (pace_np),a', 'inc a', 'ld (mt_sync),a',
+                      '%s_pw:' % p, 'ld a,(frame_count)', 'sub (hl)', 'jp m,%s_pw' % p,
+                      'ld a,(hl)', 'add a,PACE_VBLS', 'ld (hl),a', 'jr %s_pk' % p,
+                      '%s_pl:' % p, 'cp 13', 'jr c,%s_pd' % p, 'ld a,(frame_count)', 'ld (hl),a', 'xor a',
+                      '%s_pd:' % p, 'push af', 'ld a,(hl)', 'add a,PACE_VBLS', 'ld (hl),a',
+                      'ld hl,pace_np', 'pop af', 'or a', 'jr z,%s_pr' % p,
+                      'ld a,(hl)', 'or a', 'jr nz,%s_pr' % p, 'inc (hl)', 'jr %s_pk' % p,
+                      '%s_pr:' % p, 'ld (hl),0', 'ld hl,mt_sync', 'ld (hl),1',
+                      '%s_pk:' % p, 'ld hl,mt_head', 'ld (hl),%d' % MT_HEAD_VBLS,
+                      'pop hl', 'pop af')
         if a in self.c2_before:
             self.emit('call k_c2')
-        if a == SPEC_RANGE[0]:
+        if a == SPEC_RANGE[0] and SPEC_ON:
             # every assumption holds: run the specialized copy
             for v, vals in sorted(SPEC_ASSUME.items()):
                 self.emit('ld a,($%04X)' % v, 'or a')
@@ -715,6 +749,8 @@ class Gen:
                 else:
                     self.emit('jr z,%s_%04X' % (L(a), v), 'jp p,%s_g' % L(a), '%s_%04X:' % (L(a), v))
             self.emit('jp %s' % L(a + SPEC_OFS), '%s_g:' % L(a))
+            if ROAD_NATIVE != '0':
+                self.emit('xor a', 'ld (NR_gc),a')   # native line cache invalid
         if a in VIC_MAP_ENTRY:
             self.emit('call k_vic_on')
         nz = lo & (N | Z)
@@ -775,6 +811,12 @@ class Gen:
                 self.need_z()
                 src = self.operand(a, d, ramio)
                 self.emit('sbc a,' + src)
+            self.cs = 'Z'
+        elif mn == 'cmp' and a in NO_RASTER_WAIT:
+            # raster busy-wait before bitmap drawing (C64 anti-flicker): the
+            # renderer only reads the bitmap while the game is stopped, so the
+            # wait is pure delay here.  6502 C = 0: the loop's bcs falls through.
+            self.emit('scf')
             self.cs = 'Z'
         elif mn == 'cmp' and mode == 'abs' and v == 0xD012 and not ramio and \
                 tr.ins.get(a + n, (0, ''))[1] == 'bne' and tr.ins[a + n][3] == a:

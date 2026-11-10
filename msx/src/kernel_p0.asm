@@ -569,4 +569,9 @@ mt_poll:
 	ld (mt_sync),a
 	ret
 
+; colour RAM store (the translator knows HL is in $D800-$DBFF): k_iowr minus its decode
+k_colwr:
+	push af
+	ld a,h
+	jp iowr_col
 region_mem_end:
