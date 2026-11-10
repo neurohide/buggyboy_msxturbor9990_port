@@ -735,6 +735,10 @@ class Gen:
                       'ld a,(hl)', 'or a', 'jr nz,%s_pr' % p, 'inc (hl)', 'jr %s_pk' % p,
                       '%s_pr:' % p, 'ld (hl),0', 'ld hl,mt_sync', 'ld (hl),1',
                       '%s_pk:' % p, 'ld hl,mt_head', 'ld (hl),%d' % MT_HEAD_VBLS,
+                      # Refresh controls after any vblank render wait, directly
+                      # before the game loop consumes them.  Preserve BC here;
+                      # AF/HL are already saved by the hook above.
+                      'push bc', 'call read_input', 'pop bc',
                       'pop hl', 'pop af')
         if a in self.c2_before:
             self.emit('call k_c2')

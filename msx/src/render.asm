@@ -62,6 +62,7 @@ spr_tmp:         equ RV+$D0          ; 32 scratch
 rdc_gf:          equ spr_tmp+20      ; rd_cells: group-changed flag (sprites are not drawn meanwhile)
 rdc_bg:          equ spr_tmp+21      ; rd_cells: bitmap dirty bits of the group, shifted per cell
 rdc_gs:          equ spr_tmp+22      ; rd_cells: first column of the group
+dr_shad:         equ spr_tmp+23      ; draw_run: shadow entry for the current cell
 row_cram:        equ RV+$A2          ; 2: COLOR_RAM + r*40 (row_setup)
 row_shad:        equ RV+$AD          ; 2: SHADOW + r*400 (row_setup)
 rgn_rec:         equ RV+$A5          ; 2 record of the sprite region
@@ -1701,7 +1702,7 @@ shadow_ptr:                     ; C = column -> HL = its SHADOW entry
 ; spr_tmp = colour nibble, spr_tmp+1 = screen byte).  Preserves BC.
 shadow_store:
 	push hl
-	call shadow_ptr
+	ld hl,(dr_shad)
 	ex de,hl
 	ld a,(spr_tmp+1)
 	ld (de),a
@@ -1720,6 +1721,7 @@ shadow_store:
 	ldi
 	ldi
 	pop bc
+	ld (dr_shad),de             ; LDI advanced source and shadow by 8 bytes
 	ret
 
 ; HL = bank offset -> A = 64-byte chunk index
@@ -1824,6 +1826,20 @@ sm_new:
 ; render run_len cells from run_start: one LMMC per cell (12x8 pixels), the
 ; pixels go straight to the command port (no buffer, no stride)
 draw_run:
+	; shadow records are 10 bytes each; keep a running pointer across this run
+	; instead of multiplying the column by 10 again for every drawn cell.
+	ld a,(run_start)
+	ld l,a
+	ld h,0
+	add hl,hl
+	ld d,h
+	ld e,l
+	add hl,hl
+	add hl,hl
+	add hl,de
+	ld de,(row_shad)
+	add hl,de
+	ld (dr_shad),hl
 	ld a,(cur_row)
 	ld e,a
 	call row_y_of
@@ -1928,8 +1944,8 @@ dr_pix:
 	call lmmc_start             ; full command
 	pop hl
 	jr dr_out
-dr_next:                        ; later cells: resend only DX/DY/NX/NY (R#36-R#43;
-	call v_wait                 ; the command updates them) and the opcode
+dr_next:                        ; later cells: resend DX/DY/NX/NY (R#36-R#43; the
+	call v_wait                 ; command advances DY) and the opcode
 	ld a,i                      ; P/V = IFF2 (read twice, as k_get_iff)
 	jp pe,dn_on
 	ld a,i
