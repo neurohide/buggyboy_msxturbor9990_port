@@ -1956,7 +1956,7 @@ dn_on:
 	ld a,36
 	out (V_SEL),a
 	ld hl,cmdblk+4
-	ld bc,8*256+V_REG
+	ld bc,4*256+V_REG           ; DX, DY only: NX/NY survive a command
 	otir
 	pop hl
 	ld a,52

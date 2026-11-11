@@ -257,12 +257,8 @@ k_reset_ctx:
 	out (V_SEL),a
 	xor a
 	out (V_REG),a               ; STOP command
-	ld a,SEG_C2
-	ld (cur_p2),a
-	out (PORT_P2),a
-	ld a,SEG_C3
-	ld (cur_p3),a
-	out (PORT_P3),a
+	call k_map_c2
+	call k_c2
 	jp k_all_dirty              ; cells of the abandoned frame get compared again
 
 ; restart the game from scratch (C64 code jumped to $0800 inside an IRQ)
@@ -409,8 +405,7 @@ int_vblank:
 	or a
 	jr z,ivb_nokb
 	ld (hl),0
-	ld hl,0
-	ld (sli_last),hl
+	call sli_zero
 ivb_nokb:
 	; show the page the renderer finished
 	ld a,(flip_pending)
@@ -523,6 +518,36 @@ ivb_go:
 	call k_map_c2
 	xor a
 	ld (rendering),a
+	ret
+
+; main code, end of a race-loop pass: run the render it asked for now instead
+; of at the next vblank (the wait for that vblank was idle time).  Keeps every
+; register; the vblank ISR sees `rendering` set, as for its own renders.
+sli_zero:
+	ld hl,0
+	ld (sli_last),hl
+	ret
+
+; main code, end of a race-loop pass: run the render it asked for now instead
+; of at the next vblank (the wait for that vblank was idle time).  Same
+; environment as the vblank ISR gives it: C64 block 3 in page 3 (page 2 holds
+; block 2 in main code already).  Keeps BC, DE, HL (A is the caller's scratch).
+k_render_now:
+	push bc
+	push de
+	push hl
+	ld a,(cur_p3)
+	push af
+	call k_c2
+	di
+	call ivb_go
+	ei
+	pop af
+	ld (cur_p3),a
+	out (PORT_P3),a
+	pop hl
+	pop de
+	pop bc
 	ret
 
 ; A raster IRQ armed for a visible line that the beam has already passed was
@@ -1147,9 +1172,7 @@ k_vrdl:
 	ld a,(cur_p3)
 	cp SEG_VIC
 	jr z,vrdl_m
-	ld a,SEG_VIC
-	ld (cur_p3),a
-	out (PORT_P3),a
+	call k_vic_on
 vrdl_m:
 	set 7,h
 	set 6,h
@@ -1251,7 +1274,7 @@ ksl_done:
 	call pal_show
 	pop af
 	or a
-	jp z,ksl_di
+	jr z,ksl_di
 	ei
 ksl_di:
 	pop de
@@ -1296,8 +1319,7 @@ kbs_l:
 	ld ($004A),a
 	ld a,1
 	call iowf_D019
-	ld hl,0
-	ld (sli_last),hl
+	call sli_zero
 	xor a
 	ld (irq_late),a
 	ld (sli_bord),a
@@ -1449,7 +1471,7 @@ sli_set2:
 	out (V_REG),a
 	pop af
 	or a
-	jp z,sli_di
+	jr z,sli_di
 	ei
 sli_di:
 	; has the beam already passed the compare line (by less than 24 lines)?
@@ -1552,11 +1574,6 @@ v_palptr:
 	ret
 
 ; write register A with value L
-v_wreg:
-	out (V_SEL),a
-	ld a,l
-	out (V_REG),a
-	ret
 
 v_init:
 	ld a,2                      ; reset
@@ -1608,8 +1625,7 @@ vi_clr2:
 	out (V_REG),a
 	ld a,h
 	out (V_REG),a
-	ld hl,0
-	ld (sli_last),hl
+	call sli_zero
 	ld a,7
 	out (V_INT),a
 	ret

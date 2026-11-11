@@ -726,14 +726,14 @@ class Gen:
             self.emit('push af', 'push hl', 'ld hl,pace_due',
                       'ld a,(frame_count)', 'sub (hl)', 'jp p,%s_pl' % p,
                       'ld a,%d' % MT_HEAD_VBLS, 'ld (mt_head),a',
-                      'xor a', 'ld (pace_np),a', 'inc a', 'ld (mt_sync),a',
+                      'xor a', 'ld (pace_np),a', 'inc a', 'ld (mt_sync),a', 'call k_render_now',
                       '%s_pw:' % p, 'ld a,(frame_count)', 'sub (hl)', 'jp m,%s_pw' % p,
                       'ld a,(hl)', 'add a,PACE_VBLS', 'ld (hl),a', 'jr %s_pk' % p,
                       '%s_pl:' % p, 'cp 13', 'jr c,%s_pd' % p, 'ld a,(frame_count)', 'ld (hl),a', 'xor a',
                       '%s_pd:' % p, 'push af', 'ld a,(hl)', 'add a,PACE_VBLS', 'ld (hl),a',
-                      'ld hl,pace_np', 'pop af', 'or a', 'jr z,%s_pr' % p,
+                      'ld hl,pace_np', 'pop af', 'jr %s_pr' % p,   # always render (no catch-up skip)
                       'ld a,(hl)', 'or a', 'jr nz,%s_pr' % p, 'inc (hl)', 'jr %s_pk' % p,
-                      '%s_pr:' % p, 'ld (hl),0', 'ld hl,mt_sync', 'ld (hl),1',
+                      '%s_pr:' % p, 'ld (hl),0', 'ld hl,mt_sync', 'ld (hl),1', 'call k_render_now',
                       '%s_pk:' % p, 'ld hl,mt_head', 'ld (hl),%d' % MT_HEAD_VBLS,
                       # Refresh controls after any vblank render wait, directly
                       # before the game loop consumes them.  Preserve BC here;
