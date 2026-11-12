@@ -96,10 +96,12 @@ In openMSX, with a turbo R and the Gfx9000 extension:
     cd msx
     openmsx -machine Panasonic_FS-A1GT -ext gfx9000 -cart build/buggyboy.rom -romtype ASCII16
 
-The ROM first plays the MSX2 intro on the normal MSX video output. Its
-scroller asks you to switch to the V9990: select the Gfx9000 video output
-(`set videosource GFX9000` in the console, or the openMSX menu), then press
-any key or a joystick button to start the game.
+The ROM first plays the MSX2 intro on the normal MSX video output. After its
+key prompt returns to the game, switch the active video output to the V9990
+(`set videosource GFX9000` in the openMSX console, or select Gfx9000 in its
+menu). The game then shows its title/high-score screen. Press SPACE or
+joystick button 1 there to start racing; the key used to leave the intro does
+not also start the race.
 
 On real hardware you need a turbo R (256K+ mapper RAM), a V9990 cartridge,
 and the ROM in an ASCII16 MegaROM cartridge.
