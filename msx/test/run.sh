@@ -28,7 +28,10 @@ proc dumpstate {} {
 }
 set ::samp [open "$OUT.samples" w]
 proc sample {} {
-  puts \$::samp "[format %X [debug read memory 0x2F60]] [format %X [reg pc]]"
+  set sp [reg sp]
+  set w ""
+  for {set i 0} {\$i < 6} {incr i 2} { append w [format " %X" [expr {[debug read memory [expr {(\$sp+\$i)&0xFFFF}]] + 256*[debug read memory [expr {(\$sp+\$i+1)&0xFFFF}]]}]] }
+  puts \$::samp "[format %X [debug read memory 0x2F60]] [format %X [reg pc]]\$w"
   after time 0.0005 sample
 }
 after time ${SAMPLE_FROM:-0} sample

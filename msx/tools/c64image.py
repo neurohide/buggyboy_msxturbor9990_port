@@ -21,7 +21,9 @@ GAME_START = 0x0800
 IRQ_HANDLERS = [0x0932, 0x0C91, 0x10E3, 0x11C5, 0x134C, 0x141A]
 
 # (table address, entry count): little-endian pointers to code.
-JUMP_TABLES = [(0x16E1, 42), (0x1737, 42), (0x2153, 7), (0xCA5C, 6), (0xCA7F, 6), (0xF6C7, 5)]
+# The $16E1 table's last entry ($1735) is the default handler $9800; object
+# record types out of range read it, so it must be a real entry point.
+JUMP_TABLES = [(0x16E1, 43), (0x1737, 42), (0x2153, 7), (0xCA5C, 6), (0xCA7F, 6), (0xF6C7, 5)]
 
 # Routines that run with all RAM visible ($01=$30): $D000-$DFFF is RAM there.
 RAM_MODE_RANGES = [(0xED40, 0xED9F)]

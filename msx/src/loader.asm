@@ -11,7 +11,7 @@ ASCII16_P2:      equ $7000           ; bank select for $8000-$BFFF
 INTRO_BANK:      equ 15              ; ../intro/intro.rom, placed by tools/build.py
 INTRO_ENTRY:     equ $4010           ; returns after a key press
 INTRO_STUB:      equ $C100           ; RAM the intro leaves alone
-LD_VARS:         equ $E000           ; loader scratch in system RAM (page 3)
+LD_VARS:         equ $C110           ; outside the intro's C000/E000 work areas
 ld_romslot:      equ LD_VARS+0
 ld_ramprim:      equ LD_VARS+1       ; primary slot of RAM
 ld_ramsub:       equ LD_VARS+2       ; secondary slot of RAM ($FF = not expanded)
@@ -25,13 +25,6 @@ loader_start:
 	defs 6,0
 
 ld_init:
-	; the intro runs first, until a key press, on the Z80 and the MSX VDP; it swaps page 1, so
-	; the call goes through a stub in RAM
-	ld hl,ld_istub
-	ld de,INTRO_STUB
-	ld bc,ld_istub_end-ld_istub
-	ldir
-	call INTRO_STUB
 	; R800 ROM mode (keeps all mapper RAM for us)
 	ld a,$81
 	call CHGCPU
@@ -77,6 +70,14 @@ ld_init:
 	and 3
 ld_noexp:
 	ld (ld_ramsub),a
+	; Run the intro before copying the game images. Its variables and IM2
+	; table live in page-3 RAM, and the RAM trampoline survives the bank swap.
+	ld hl,ld_intro_stub
+	ld de,INTRO_STUB
+	ld bc,ld_intro_stub_end-ld_intro_stub
+	ldir
+	jp INTRO_STUB
+ld_after_intro:
 	; our ROM in page 2 as well
 	ld a,(ld_romslot)
 	ld h,$80
@@ -172,15 +173,16 @@ ld_t_nosub:
 	jp k_init
 ld_tramp_end:
 
-; copied to INTRO_STUB and run from there (page 3 RAM)
-ld_istub:
+; Runs from page-3 RAM so returning from bank 15 does not fetch bank-0 code
+; until the bank has been restored.
+ld_intro_stub:
 	ld a,INTRO_BANK
 	ld (ASCII16_P1),a
 	call INTRO_ENTRY
 	xor a
 	ld (ASCII16_P1),a
-	ret
-ld_istub_end:
+	jp ld_after_intro
+ld_intro_stub_end:
 
 ; ROM bank, mapper segment
 ld_table:
