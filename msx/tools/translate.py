@@ -78,7 +78,7 @@ VIC_REGS_ADDR = 0x2F00         # defs.inc VIC_REGS
 MAIN_LOOP = 0x8003     # called once per race-loop pass: render once per pass
 MT_HEAD_VBLS = 50      # vblanks without a pass before raster polls drive renders again
 NO_RASTER_WAIT = {0x8014}  # 'cmp $D012 / bcs self' waits translated as already passed
-IO_FAST = (0xD011, 0xD012, 0xD016, 0xD019, 0xD021, 0xD022, 0xD023)   # handlers: iowf_XXXX in kernel_p2.asm
+IO_FAST = (0xD011, 0xD012, 0xD016, 0xD019, 0xD021, 0xD022, 0xD023)   # handlers: iowf_XXXX in src/kernel/p2_io_write.asm
 SEG_CODE_FIRST = 8            # mapper segment number of the first code segment
 
 # flags read (uses) / written (defs) per mnemonic

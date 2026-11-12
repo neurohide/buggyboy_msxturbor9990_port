@@ -2,6 +2,7 @@
 """Map Z80 (page-1 segment, PC) samples back to C64 addresses / kernel labels.
 usage: symmap.py samples.txt   (lines: "<seg> <pc>" in hex)"""
 import bisect
+import glob
 import os
 import re
 import sys
@@ -28,9 +29,14 @@ def load():
         if m:
             lab[m.group(1)] = int(m.group(2), 16)
     tables = {}
-    for key, f in (('k', 'kernel_p0.asm'), ('k', 'kernel_p2.asm'), ('r', 'render.asm'),
-                   ('l', 'loader.asm')):
-        names = code_labels(os.path.join(ROOT, 'src', f))
+    sources = (
+        [('k', os.path.join(ROOT, 'src', 'kernel_p0.asm'))]
+        + [('k', f) for f in sorted(glob.glob(os.path.join(ROOT, 'src', 'kernel', 'p[02]_*.asm')))]
+        + [('r', os.path.join(ROOT, 'src', 'render.asm'))]
+        + [('l', os.path.join(ROOT, 'src', 'loader.asm'))]
+    )
+    for key, path in sources:
+        names = code_labels(path)
         tables.setdefault(key, []).extend((lab[n], n) for n in names if n in lab)
     seg = None
     for l in open(os.path.join(ROOT, 'build', 'code.asm')):
