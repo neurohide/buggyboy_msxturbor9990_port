@@ -41,6 +41,10 @@ by the owners of *Buggy Boy*.
 | `intro/` | Original MSX2 intro (SCREEN 5 wave parallax, sine scroller, PSG music). It runs before the game and asks you to switch to the V9990 output. |
 | `docs/` | Screenshots. |
 
+The renderer source is split into focused files under `msx/src/render/`.
+`msx/src/render.asm` includes them in assembly order and keeps the renderer's
+memory region contiguous for the build tool.
+
 ## Building
 
 ### Requirements
@@ -120,7 +124,7 @@ STOP = pause (C64 RUN/STOP), ESC = C64 "←" key.
 | Image + tracer | `msx/tools/c64image.py` | Rebuilds the C64 memory image from the listing, applies the crack's start-up patches, traces all code (including code only reachable through jump tables). |
 | Translator | `msx/tools/translate.py` | 6502 → Z80: A→A, X→E (D=0), Y→C (B=0), N/Z→S/Z, carry polarity tracked lazily, flag liveness analysis, self-modifying operands read at run time. JMP-connected code stays in one 16K segment; JSR across segments goes through `k_farcall`. |
 | Kernel | `msx/src/kernel_p0.asm`, `msx/src/kernel_p2.asm` | Lives in C64 pages that only held 6502 code. IM2 interrupt entry, memory helpers, VIC/SID/CIA register emulation, raster timing from the turbo R system timer, far calls, indirect-jump dispatch (hash table), SID→PSG with software ADSR, joystick/keyboard. |
-| Renderer | `msx/src/render.asm` | Own mapper segment, runs at V9990 vblank. Draws dirty C64 cells (text, multicolour, bitmap) into V9990 B3 (512×212, 4bpp) at 3 pixels per C64 multicolour pixel, so the full 40-column screen fits with the right aspect ratio. Sprites are cached as shapes in VRAM and blitted, and the display is double buffered. |
+| Renderer | `msx/src/render.asm`, `msx/src/render/` | Own mapper segment, runs at V9990 vblank. Draws dirty C64 cells (text, multicolour, bitmap) into V9990 B3 (512×212, 4bpp) at 3 pixels per C64 multicolour pixel, so the full 40-column screen fits with the right aspect ratio. Sprites are cached as shapes in VRAM and blitted, and the display is double buffered. |
 | Intro | `intro/` | ROM bank 15, assembled for page 1. The loader maps it in from a RAM stub and calls its key entry (`$4010`, returns after a key press and release) on the Z80, before anything else. |
 | Loader | `msx/src/loader.asm` | ROM bank 0: runs the intro, switches to R800, copies the images into mapper segments, takes over all four pages. |
 
@@ -136,6 +140,35 @@ VIC register change is recorded in a per-frame timeline, and the renderer
 uses it to pick the mode, colours and sprite set for each character row.
 Handlers whose line was armed too late are run right away, or at the latest
 at vblank, so the game keeps its 50 Hz rhythm.
+
+### Reading the assembly
+
+Start at `msx/src/main.asm`. It includes the shared constants, page-0 and
+page-2 kernel code, renderer, translated game code, and cartridge loader.
+`msx/src/defs.inc` defines mapper segments, device ports, display geometry, and
+the kernel's shared RAM variables.
+
+The renderer's include order in `msx/src/render.asm` follows its work for each
+frame:
+
+1. `state.inc` describes renderer RAM and the clean-playfield shadow.
+2. `frame.asm` enters a frame, snapshots dirty flags, and starts the raster
+   timeline.
+3. `rows.asm` reads the raster state and prepares each character row.
+4. `dirty.asm` finds changed cells and handles whole-cell and fine scrolling.
+5. `draw.asm`, `colors.asm`, and `pixels.asm` select colours and convert C64
+   cell pixels into V9990 data.
+6. `commands.asm` sends V9990 drawing commands; `sprites.asm` draws sprites
+   and synchronizes the double-buffered display pages.
+7. `tables.asm` holds renderer lookup tables.
+
+To follow one rendered row, trace `render_frame` → `renderer_setup_row` →
+`renderer_find_dirty_cells` → `renderer_draw_dirty_cells`; after all rows,
+`render_sprites` updates the back page. Routine comments describe important
+input and output registers. Routine entry points use descriptive names, while
+short labels inside a routine mark local branches. Generated translated-code
+labels retain their C64 addresses because the translator and debug tools use
+those addresses to identify game code.
 
 ## Known limitations
 

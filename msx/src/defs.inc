@@ -1,6 +1,9 @@
 ; Shared constants for the MSX turbo R / V9990 port of C64 Buggy Boy.
+; `equ` assigns a name to a value and emits no bytes. Keep this file as the
+; common vocabulary for the kernel, renderer, loader, and translated game.
 
 ; ---- memory mapper ----------------------------------------------------------
+; Each port selects the 16K RAM segment visible in one Z80 address page.
 PORT_P0:         equ $FC
 PORT_P1:         equ $FD
 PORT_P2:         equ $FE
@@ -45,6 +48,9 @@ PAL_BORDER:      equ 3               ; $D020 (live, backdrop)
 PAL_FIXED:       equ 4               ; first slot for fixed C64 colours
 
 ; ---- resident kernel data in C64 code holes (page 0) -----------------------
+; The translated game keeps the original C64 address layout. These symbols
+; occupy unused code addresses in that layout, so their numeric addresses are
+; part of the kernel's memory map.
 COLOR_RAM:       equ $2A00           ; 1K, C64 $D800-$DBFF
 VDIRTY:          equ $2E00           ; 256 flags, one per 64 bytes of VIC bank
 KVARS:           equ $2F00
@@ -105,7 +111,8 @@ PACE_VBLS:       equ 4               ; vblanks per race-loop pass (C64 original:
 kb_list:         equ $3040           ; 23: (line, colour) per chained band, then band 12's line
 ; KVARS+$E0..: C64 page-3 variables relocated by translate.py RELOC ($FB2A)
 
-; timeline: two buffers of TL_MAX records of 64 bytes (in two separate holes)
+; The interrupt code writes one event record per raster change. Two buffers
+; let the game write the next frame while the renderer reads the last one.
 TIMELINE:        equ $3100
 TIMELINE1:       equ $3800
 TL_MAX:          equ 16
