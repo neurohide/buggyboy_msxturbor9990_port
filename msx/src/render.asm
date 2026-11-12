@@ -76,6 +76,9 @@ row_xchg:        equ RV+$CC          ; row_setup: the row's x offset changed thi
 cm_fc:           equ RV+$CD          ; CMMC cell: foreground colour byte (colour * $11)
 cm_bc:           equ RV+$CE          ; background colour byte
 cm_x:            equ RV+$CF          ; fg value * $55: XOR makes fg pixels 00
+cm_lv:           equ RV+$5A          ; cm_lfc/cm_lbc hold what R#48-51 contain
+cm_lfc:          equ RV+$5B
+cm_lbc:          equ RV+$5C
 CM_TA:           equ $5C00           ; CMMC tables, index = source byte ^ cm_x, 12 bits
 CM_TB:           equ $5D00           ; per byte (bit 11 = left pixel, fg pixel = 1):
 CM_TC:           equ $5E00           ; TA = bits 11-4, TB = bits 3-0 << 4,
@@ -176,6 +179,7 @@ r_sci_n:
 	ld (cc_key),a               ; no row_mode is $FF: cell_cols is rebuilt
 	xor a
 	ld (mode_rows),a
+	ld (cm_lv),a
 	ld hl,(dbg_cnt)
 	ld (dbg_cells),hl
 	ld hl,0
@@ -2070,20 +2074,47 @@ dt_on:
 	ld a,36
 	out (V_SEL),a
 	ld hl,cmdblk+4
+	ld a,(dr_full)
+	or a
+	jr z,dt_dxy
+	xor a
+	ld (dr_full),a
 	ld bc,8*256+V_REG
 	otir                        ; DX, DY, NX, NY
 	xor a
 	out (V_REG),a               ; R#44 ARG
 	ld a,$0C
 	out (V_REG),a               ; R#45 LOP: WC = SC (no transparency)
+	jr dt_cols
+dt_dxy:                         ; later cells of the run: NX/NY, ARG, LOP survive
+	ld bc,4*256+V_REG
+	otir                        ; DX, DY
+dt_cols:
+	ld a,(cm_lv)
+	or a
+	jr z,dt_send
+	ld hl,cm_fc
+	ld a,(cm_lfc)
+	cp (hl)
+	jr nz,dt_send
+	inc hl                      ; cm_bc
+	ld a,(cm_lbc)
+	cp (hl)
+	jr z,dt_op                  ; R#48-51 already hold these colours
+dt_send:
 	ld a,48
 	out (V_SEL),a
 	ld a,(cm_fc)
+	ld (cm_lfc),a
 	out (V_REG),a
 	out (V_REG),a               ; R#48/49 foreground
 	ld a,(cm_bc)
+	ld (cm_lbc),a
 	out (V_REG),a
 	out (V_REG),a               ; R#50/51 background
+	ld a,1
+	ld (cm_lv),a
+dt_op:
 	ld a,52
 	out (V_SEL),a
 	ld a,$50                    ; CMMC
@@ -2883,6 +2914,7 @@ lmmv:
 	ld (cmdblk+16),a            ; FC
 	ld (cmdblk+17),a
 	xor a
+	ld (cm_lv),a                ; FC changes
 	ld (cmdblk+12),a            ; ARG
 	ld a,$0C
 	ld (cmdblk+13),a            ; LOP: WC = SC
