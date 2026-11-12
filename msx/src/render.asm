@@ -72,7 +72,7 @@ coll_acc:        equ RV+$AB
 ntq:             equ RV+$B0          ; 8: nt_build, 4 x (colour, colour * $11)
 fslot:           equ RV+$B8          ; 16: fix_slot cache, C64 colour -> slot (0 = not yet)
 cc_key:          equ RV+$C8          ; 3: row_mode, colour nibble, screen byte cell_cols was made from
-row_xchg:        equ RV+$CC          ; row_setup: the row's x offset changed this frame
+row_xchg:        equ RV+$CC          ; signed fine pixel delta, then combined shift
 cm_fc:           equ RV+$CD          ; CMMC cell: foreground colour byte (colour * $11)
 cm_bc:           equ RV+$CE          ; background colour byte
 cm_x:            equ RV+$CF          ; fg value * $55: XOR makes fg pixels 00
@@ -519,9 +519,8 @@ rs_den:
 	add a,b
 	srl a
 	ld (row_xoff),a
-	; A changed horizontal offset moves every pixel in the row (the road
-	; curves this way): shift the drawn row in VRAM instead of redrawing it.
-	; Cells whose bytes changed are still found by row_dirty.
+	; Keep the fine pixel delta until row_dirty, where it can be combined
+	; with a whole-cell horizon move into one VRAM blit.
 	ld a,(cur_row)
 	ld e,a
 	ld d,0
@@ -532,10 +531,11 @@ rs_den:
 	ld a,(row_xoff)
 	cp (hl)
 	jr z,rs_xsame
-	ld a,1
-	ld (row_xchg),a
-	ld a,(row_xoff)
 	ld b,(hl)                   ; old offset
+	ld c,a
+	sub b
+	ld (row_xchg),a             ; signed fine pixel delta
+	ld a,c
 	ld (hl),a
 	ld hl,row_full
 	add hl,de
@@ -545,9 +545,6 @@ rs_den:
 	ld a,(row_mode)
 	bit 2,a
 	jr nz,rs_xfull              ; blank row
-	ld a,(hl)
-	or a
-	call z,row_shift            ; not redrawn anyway: move it
 	jr rs_xsame
 rs_xfull:
 	ld (hl),1
@@ -748,6 +745,10 @@ rd_all:
 	or 1
 	ret
 rd_check:
+	; A fine offset change may move the row even when no source bytes changed.
+	ld a,(row_xchg)
+	or a
+	jp nz,rd_coarse
 	ld a,(row_edge)
 	or a
 	jr z,rd_check2
@@ -938,60 +939,94 @@ row_coarse:
 	call rc_try
 	jr z,rc_go
 rc_no:
-	xor a
+	; No whole-cell match: still apply the deferred fine pixel displacement.
+	ld a,(row_xchg)
+	or a
+	ret z
+	ld b,0                      ; fine-only move keeps the old 480-pixel width
+	call rc_fine
+	or 1
 	ret
 rc_go:
 	push de
+	; Combine the coarse cell shift with the deferred fine pixel delta.
+	ld a,d
+	add a,a
+	add a,d
+	add a,a
+	add a,a                     ; 12*k
+	ld b,a
+	ld a,(row_xchg)
+	add a,b
+	ld (row_xchg),a             ; combined signed pixel displacement
+	ld b,1                      ; coarse move clips the exposed edge
+	call rc_fine
+	; Shadow: retain the original whole-cell k for its memmove.
+	jp rc_shadow
+
+; Apply row_xchg pixels as one overlap-safe LMMM, using current cell origin.
+rc_fine:
+	ld a,(row_xchg)
+	or a
+	ret z
+	push ix
+	push bc                     ; B selects clipped (coarse) versus full width
 	ld a,(cur_row)
 	call row_y_clean            ; also marks the row for the page sync
 	ld (cmdblk+2),hl
 	ld (cmdblk+6),hl
 	ld hl,8
 	ld (cmdblk+10),hl
-	pop de
-	push de
-	ld a,d
+	ld a,(row_xchg)
+	ld b,a
+	ld a,b
 	bit 7,a
-	jr z,rc_pos
+	jr z,rcf_abs
 	neg
-rc_pos:
-	ld b,a                      ; |k|
-	add a,a
-	add a,b
-	add a,a
-	add a,a                     ; 12|k|
-	ld e,a
+rcf_abs:
+	ld c,a
+	ld e,c
 	ld d,0
+	pop bc
 	ld hl,480
+	ld a,b
 	or a
+	jr z,rcf_width
+	xor a
 	sbc hl,de
-	ld (cmdblk+8),hl            ; NX = 480 - 12|k|
+rcf_width:
+	ld (cmdblk+8),hl            ; NX = 480 or 480 - |displacement|
 	ld a,(row_xoff)
 	ld c,a
 	ld b,0
 	ld hl,SCREEN_X
-	add hl,bc                   ; HL = x of cell 0
-	pop bc                      ; B = k
-	push bc
-	bit 7,b
-	jr nz,rc_left
-	; right: copy backwards from the last pixel, DIX=1
-	push de
+	add hl,bc                   ; current cell 0 origin
+	ld a,(row_xchg)
+	bit 7,a
+	jr nz,rcf_left
+	push hl
 	ld de,479
 	add hl,de
-	pop de
-	ld (cmdblk+4),hl            ; DX = cell 0 + 479
+	ld (cmdblk+4),hl            ; DX = right edge
+	ld a,(row_xchg)
+	ld c,a
+	ld b,0
 	or a
-	sbc hl,de
-	ld (cmdblk+0),hl            ; SX = DX - 12k
-	ld a,4
-	jr rc_cmd
-rc_left:
-	ld (cmdblk+4),hl            ; DX = cell 0
+	sbc hl,bc
+	ld (cmdblk+0),hl            ; SX = DX - displacement
+	pop hl
+	ld a,4                      ; backwards overlap copy
+	jr rcf_cmd
+rcf_left:
+	ld (cmdblk+4),hl            ; DX = left edge
+	ld a,(row_xchg)
+	neg
+	ld e,a
+	ld d,0
 	add hl,de
-	ld (cmdblk+0),hl            ; SX = cell 0 + 12|k|
-	xor a
-rc_cmd:
+	ld (cmdblk+0),hl            ; SX = DX + |displacement|
+	xor a                       ; forwards overlap copy
+rcf_cmd:
 	ld (cmdblk+12),a            ; ARG
 	ld a,$0C
 	ld (cmdblk+13),a
@@ -1001,6 +1036,16 @@ rc_cmd:
 	ld a,$40                    ; LMMM
 	ld (cmdblk+20),a
 	call v_send_cmd
+	ld a,(row_csel)
+	or a
+	jr nz,rcf_done
+	inc a
+	ld (row_edge),a
+rcf_done:
+	pop ix
+	ret
+
+rc_shadow:
 	; shadow: 10 bytes per cell
 	pop de                      ; D = k
 	ld a,d
