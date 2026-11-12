@@ -1653,10 +1653,13 @@ c64_rgb:
 ; input (once per frame)
 ; ============================================================================
 read_input:
-	; joystick port 1 via PSG R14 (port A selected in R15 bit 6 = 0)
+	; joystick port 1 via PSG R14. R15 drives the connector lines: pin 6/7
+	; high, pin 8 low, and bit 6 low selects port 1.
 	ld a,15
 	out ($A0),a
 	in a,($A2)
+	or $03                     ; port 1 pins 6 and 7 high
+	and $EF                    ; port 1 pin 8 low
 	and $BF
 	out ($A1),a
 	ld a,14
