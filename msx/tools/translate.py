@@ -388,6 +388,11 @@ class Gen:
             return range_class(v, v + 255) == 'vic'
         return False
 
+    def vic_generic(self, a):
+        """vic_store whose address is not statically the VIC bank (k_gwrl/k_gwrm)."""
+        op, mn, mode, v, n = self.tr.ins[a]
+        return mode == 'izy' and not any(lo_ <= a < hi_ for lo_, hi_ in VIC_PTR_CODE)
+
     def vic_load(self, a):
         """Non-store instruction reading the VIC bank through an abs/abx/aby operand."""
         op, mn, mode, v, n = self.tr.ins[a]
@@ -472,7 +477,9 @@ class Gen:
                     m, s = True, True
                 vin[a], min_[a] = m, s
                 if self.vic_store(a) or self.vic_load(a):
-                    o, so = True, True
+                    # a pointer store outside VIC_PTR_CODE may hit another bank
+                    # (k_gwrl maps C64 block 3 back then): VIC mapped only maybe
+                    o, so = True, not self.vic_generic(a)
                 elif m and not self.vic_safe(a):
                     o, so = False, False
                 else:
