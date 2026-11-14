@@ -773,6 +773,26 @@ spc_h:
 	ldir
 	ld a,1
 	ld (de),a
+	; mark the slot live for r_sci's invalidation scan (frame.asm)
+	ld a,(spr_tmp+15)
+	ld c,a                      ; C = slot
+	ld hl,sc_in
+	ld e,a
+	ld d,0
+	add hl,de
+	ld a,(hl)
+	or a
+	jr nz,spc_liv
+	ld (hl),1                   ; sc_in[slot] = 1
+	ld a,(sc_n)
+	ld e,a                      ; E = insertion index
+	inc a
+	ld (sc_n),a
+	ld d,0
+	ld hl,sc_live
+	add hl,de
+	ld (hl),c                   ; sc_live[sc_n] = slot
+spc_liv:
 	call sp_render
 spc_pos:
 	; slot position: column = slot % 7, row = slot / 7

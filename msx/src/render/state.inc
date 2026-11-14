@@ -94,6 +94,10 @@ SH_ROWS:         equ $F100           ; 25 flags: clean rows changed this frame
 SH_ROWP:         equ SH_ROWS+32      ; 25 flags: clean rows changed last frame
 SH_PG:           equ $F140           ; [0..1] sprites drawn per page, [2..3] page built
 SH_CUR_PG:       equ SH_PG+4         ; page being synced
+; live sprite cache slots: r_sci only walks slots that hold a cached shape
+sc_n:            equ RV+$A4          ; number of entries in sc_live
+sc_in:           equ $6C00           ; 128 membership flags (free above SCACHE)
+sc_live:         equ $6C80           ; 128 slot numbers, sc_n entries
 SH_EARLY:        equ SH_CUR_PG+1     ; 1: rows were synced to the back page during this render
 SH_XOFF:         equ $F150           ; last rendered horizontal offset for each row
 ; changed x span of each clean row, 4-pixel units from SCREEN_X, [lo, hi)

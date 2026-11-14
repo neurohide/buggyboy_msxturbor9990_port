@@ -13,12 +13,17 @@ render_frame:
 	ld de,VDW
 	ld bc,256
 	ldir
+	; clear VDIRTY: write one zero and replicate it with LDIR (a byte
+	; loop costs ~29 cycles per byte on the Z80, LDIR is 16)
 	ld hl,VDIRTY
-	ld b,0
-r_clr:
 	ld (hl),0
-	inc hl
-	djnz r_clr
+	ld d,h
+	ld e,l
+	inc de
+	push bc
+	ld bc,255
+	ldir
+	pop bc
 	ld hl,cdirty
 	ld de,cdw
 	ld bc,16
@@ -31,26 +36,64 @@ r_clr2:
 	djnz r_clr2
 	ei
 	; sprite shapes the game rewrote (one 64-byte chunk per pointer): drop
-	; their cached copies so they are rendered again
-	ld hl,SCACHE
-	ld b,SC_SLOTS
-	ld d,VDW/256
+	; their cached copies so they are rendered again.  Only the live slots
+	; hold a cached shape (sc_live); stale entries are pruned here as well.
+	ld b,0                      ; list index
 r_sci:
-	ld e,(hl)                   ; key byte 0 = pointer
+	ld a,(sc_n)
+	cp b
+	jr z,r_sci_done
+	ld a,b
+	ld hl,sc_live
+	ld e,a
+	ld d,0
+	add hl,de
+	ld a,(hl)                   ; slot number
+	push af
+	add a,a
+	add a,a
+	add a,a
+	ld e,a
+	ld d,0
+	ld hl,SCACHE
+	add hl,de                   ; slot entry
+	ld e,(hl)                   ; key byte 0 = pointer chunk
+	ld d,VDW/256
 	ld a,(de)
 	or a
-	jr z,r_sci_n
+	jr z,r_sci_keep
+	; source chunk changed: invalidate the shape and prune the slot
 	push hl
 	ld de,5
 	add hl,de
 	ld (hl),0                   ; valid flag
 	pop hl
-	ld d,VDW/256
-r_sci_n:
-	ld de,8
+	pop af                      ; A = slot
+	ld hl,sc_in
+	ld e,a
+	ld d,0
 	add hl,de
-	ld d,VDW/256
-	djnz r_sci
+	ld (hl),0                   ; sc_in[slot] = 0
+	ld a,(sc_n)
+	dec a                       ; last entry index
+	ld e,a
+	ld d,0
+	ld hl,sc_live
+	add hl,de
+	ld a,(hl)                   ; sc_live[sc_n-1]
+	ld e,b
+	ld d,0
+	ld hl,sc_live
+	add hl,de
+	ld (hl),a                   ; sc_live[b] = sc_live[sc_n-1]
+	ld hl,sc_n
+	dec (hl)                    ; position b is examined again next pass
+	jr r_sci
+r_sci_keep:
+	pop af
+	inc b
+	jr r_sci
+r_sci_done:
 	ld a,$FF
 	ld (chd_cb),a
 	ld (cc_key),a               ; no row_mode is $FF: cell_cols is rebuilt
@@ -106,6 +149,16 @@ render_first:
 	ld a,1
 	ld (first_done),a
 	call cm_init
+	; no cached row setups, no live sprite cache slots yet
+	xor a
+	ld (sc_n),a
+	ld hl,sc_in
+	ld (hl),a
+	ld d,h
+	ld e,l
+	inc de
+	ld bc,127
+	ldir
 	ld a,$80
 	ld (celldirty+40),a         ; renderer_draw_dirty_cells scan sentinel
 	ld hl,SH_XOFF

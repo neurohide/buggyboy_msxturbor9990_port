@@ -71,6 +71,13 @@ mt_poll:
 	ld a,(rendering)
 	or a
 	ret nz
+if MSX2PLUS
+	; Alternate raster-poll render requests on plain Z80 systems. The vblank
+	; scheduler's existing one-vblank fallback still catches the next frame.
+	ld a,(frame_count)
+	and 1
+	ret nz
+endif
 	inc a
 	ld (mt_sync),a
 	ret
