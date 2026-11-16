@@ -81,9 +81,9 @@ cc_new:
 	ld (cell_cols),a
 	ld a,(SH_BGS)
 	ld (cell_cols+1),a
-	ld a,1
+	ld a,(SH_BG1)
 	ld (cell_cols+2),a
-	inc a
+	ld a,(SH_BG2)
 	ld (cell_cols+3),a
 	pop hl
 	ret

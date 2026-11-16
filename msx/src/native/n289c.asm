@@ -683,6 +683,9 @@ NR_nx:
 	jp nz,NR_line
 NR_exit:
 	call k_c2
+	if MSX2PLUS
+	call race_ready
+	endif
 	ld e,$48
 	ret
 NR_e1r:                         ; edge 1, range line (E = index)

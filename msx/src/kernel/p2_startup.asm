@@ -65,7 +65,7 @@ ki_keys:
 	out (PORT_P1),a
 	ld hl,LU_CACHE
 	ld de,LU_CACHE+1
-	ld bc,9
+	ld bc,16*5-1
 	ld (hl),0
 	ldir
 	call psg_init

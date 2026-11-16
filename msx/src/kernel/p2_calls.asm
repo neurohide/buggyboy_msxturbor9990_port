@@ -70,7 +70,7 @@ k_lookup:
 	push de
 	ld a,l
 	xor h
-	and 1
+	and 15
 	ld e,a
 	add a,a
 	add a,a
@@ -149,7 +149,7 @@ klu_step:
 klu_found:
 	ld a,l
 	xor h
-	and 1
+	and 15
 	ld e,a
 	add a,a
 	add a,a

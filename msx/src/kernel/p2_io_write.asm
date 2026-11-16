@@ -102,7 +102,7 @@ iowr_vic_old:
 	ld a,l
 	jr nz,iowr_vic_new
 	cp $19                      ; IRQ acknowledge acts on every write
-	jr z,iowr_d019
+	jp z,iowr_d019
 	jr iowr_x
 iowr_vic_new:
 	; $D020-$D023 (live palette slots: border/bg0/bg1/bg2) are written far
@@ -162,11 +162,30 @@ iowr_d011:
 	ld a,(in_irq)
 	or a
 	jr nz,iowr_d012
+	ld a,(calm_flips)
 	inc a
+	jr z,iowr_d012               ; already blank: keep the original timeout
+	ld a,1
 	ld (blank_req),a            ; mode change from main code: new screen
-	dec a
-	dec a
-	ld (calm_flips),a           ; $FF: keep blank until the renderer settles
+	if MSX2PLUS
+	; A race switches the course screen to the multicolour bitmap at $2000.
+	; Preserve the complete front page until its first road draw has finished.
+	ld a,(VIC_REGS+$11)
+	bit 5,a
+	jr z,iowr_d011_norace
+	ld a,(VIC_REGS+$18)
+	cp $1A
+	jr nz,iowr_d011_norace
+	ld a,1
+	ld (race_wait),a
+	xor a
+	ld (flip_pending),a
+iowr_d011_norace:
+	endif
+	ld a,$FF
+	ld (calm_flips),a           ; blank until rows settle or timeout
+	xor a
+	ld (busy_vbls),a
 	call k_get_iff
 	push af
 	di

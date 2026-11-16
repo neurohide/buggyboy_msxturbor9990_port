@@ -114,13 +114,20 @@ ntb_hires:
 	ld hl,NT
 	ld c,0
 ntb_h:
-	ld a,c
-	and 8
-	call ntb_bit
+	bit 3,c
+	ld a,(nt_key+1)
+	jr z,ntb_h0
+	ld a,(nt_key+2)
+ntb_h0:
 	ld d,a                      ; h0
-	ld a,c
-	and $0C
-	call ntb_bit
+	ld a,(nt_key+1)
+	bit 3,c
+	jr nz,ntb_h01_one
+	bit 2,c
+	jr z,ntb_h01
+ntb_h01_one:
+	ld a,(nt_key+2)
+ntb_h01:
 	ld e,a                      ; h0|h1
 	ld a,d
 	add a,a
@@ -130,31 +137,42 @@ ntb_h:
 	or e
 	ld (hl),a
 	inc l
-	ld a,c
-	and 4
-	call ntb_bit
+	bit 2,c
+	ld a,(nt_key+1)
+	jr z,ntb_h1
+	ld a,(nt_key+2)
+ntb_h1:
 	add a,a
 	add a,a
 	add a,a
 	add a,a
 	ld b,a                      ; h1 in high nibble
-	ld a,c
-	and 2
-	call ntb_bit
+	bit 1,c
+	ld a,(nt_key+1)
+	jr z,ntb_h2
+	ld a,(nt_key+2)
+ntb_h2:
 	or b
 	ld (hl),a                   ; h1, h2
 	inc l
-	ld a,c
-	and 3
-	call ntb_bit
+	ld a,(nt_key+1)
+	bit 1,c
+	jr nz,ntb_h23_one
+	bit 0,c
+	jr z,ntb_h23
+ntb_h23_one:
+	ld a,(nt_key+2)
+ntb_h23:
 	add a,a
 	add a,a
 	add a,a
 	add a,a
 	ld b,a
-	ld a,c
-	and 1
-	call ntb_bit
+	bit 0,c
+	ld a,(nt_key+1)
+	jr z,ntb_h3
+	ld a,(nt_key+2)
+ntb_h3:
 	or b
 	ld (hl),a                   ; h2|h3, h3
 	inc l
@@ -163,11 +181,6 @@ ntb_h:
 	ld a,c
 	cp 16
 	jr nz,ntb_h
-	ret
-ntb_bit:                        ; Z -> colour 0 (nt_key+1), NZ -> colour 1 (nt_key+2)
-	ld a,(nt_key+1)
-	ret z
-	ld a,(nt_key+2)
 	ret
 
 ; HL = 8 source bytes: Z and A = colour byte if the whole cell is one colour

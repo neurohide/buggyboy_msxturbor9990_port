@@ -83,16 +83,17 @@ sid_phase:       equ KVARS+$9E       ; 3 bytes: 0 off, 1 attack, 2 decay/sustain
 sid_lvl:         equ KVARS+$A1       ; 6 bytes: 8.8 envelope level per voice
 debug_last:      equ KVARS+$B0       ; 2 bytes: last unimplemented / error address
 debug_code:      equ KVARS+$B2
+race_wait:       equ KVARS+$B3       ; MSX2+: hold the previous page while race bitmap is built
 irq_count:       equ KVARS+$B4       ; 2 bytes
 vbl_pending:     equ KVARS+$B6
 cur_p3:          equ KVARS+$B7       ; mapper segment in page 3
 irq_late:        equ KVARS+$B8       ; raster line armed after it had passed
-LU_CACHE:        equ $3060           ; 2 x 5 (free RAM after kb_list; was $8DD4 at the k2 end): direct-mapped k_lookup cache (C64 lo, hi, seg, Z80 addr); 0 = empty
+LU_CACHE:        equ $3060           ; 16 x 5: direct-mapped k_lookup cache (C64 lo, hi, seg, Z80 addr); 0 = empty
 lu_cache:        equ KVARS+$B9       ; 5: last k_lookup (C64 addr, seg, Z80 addr)
 page_back:       equ KVARS+$BE       ; display page being drawn (0/1)
 flip_pending:    equ KVARS+$BF       ; back page complete: show it at vblank
 tl_hadirq:       equ KVARS+$C0       ; 2: a C64 IRQ ran in timeline buffer 0/1
-busy_vbls:       equ KVARS+$C2       ; vblanks the renderer has been busy for
+busy_vbls:       equ KVARS+$C2       ; blank timeout in vblanks; 150 latches until rows settle
 calm_flips:      equ KVARS+$C3       ; page flips to keep blank ($FF: until the renderer says so)
 in_irq:          equ KVARS+$C4       ; a C64 IRQ handler is running
 blank_req:       equ KVARS+$C5       ; main code changed the display mode: new screen coming

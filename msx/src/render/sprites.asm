@@ -514,6 +514,24 @@ spl_on:
 	ld c,a
 	ld a,SEG_SHADOW
 	out (PORT_P3),a
+	ld a,c
+	or a
+	jr nz,spl_restore			; upper zone from L132F: not the race layout
+	ld a,($1486)
+	ld (spl_live+0),a
+	ld a,($148E)
+	ld (spl_live+1),a
+	ld a,($1487)
+	ld (spl_live+2),a
+	ld a,($148F)
+	ld (spl_live+3),a
+	ld a,($02E5)
+	ld (spl_live+4),a
+	ld a,($1496)
+	ld (spl_live+5),a
+	ld a,($1497)
+	ld (spl_live+6),a
+spl_restore:
 	pop af
 	jp po,spl_di
 	ei
@@ -527,21 +545,21 @@ spl_di:
 	ld hl,LTL+8                 ; VIC registers of the record
 	ld de,TL_REC-$10
 spl_l:
-	ld a,($1486)
+	ld a,(spl_live+0)
 	ld (hl),a                   ; sprite 0 X
 	inc l
-	ld a,($148E)
+	ld a,(spl_live+1)
 	ld (hl),a                   ; sprite 0 Y
 	inc l
-	ld a,($1487)
+	ld a,(spl_live+2)
 	ld (hl),a                   ; sprite 1 X
 	inc l
-	ld a,($148F)
+	ld a,(spl_live+3)
 	ld (hl),a                   ; sprite 1 Y
 	ld a,l
 	add a,$10-3
 	ld l,a
-	ld a,($02E5)
+	ld a,(spl_live+4)
 	xor (hl)
 	and 3
 	xor (hl)
@@ -550,10 +568,10 @@ spl_l:
 	ld a,l
 	add a,$20
 	ld l,a                      ; record + $38: sprite pointers
-	ld a,($1496)
+	ld a,(spl_live+5)
 	ld (hl),a
 	inc l
-	ld a,($1497)
+	ld a,(spl_live+6)
 	ld (hl),a
 	pop hl
 	add hl,de

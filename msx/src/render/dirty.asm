@@ -939,36 +939,37 @@ gb_n:
 	djnz gb_l
 	ret
 
-; The game is building a new screen when many character rows change their
-; display mode at once (text <-> bitmap, display off/on); that never happens
-; while racing.  The display stays blank (calm_flips = $FF, the kernel blanks
-; at the page flip) until the redraws have been small for 10 frames, at most
-; ~3 seconds, so the half-built screen is not shown.
+; Blank large screen changes until rows settle. The vblank handler enforces a
+; real-time timeout so a slow renderer cannot leave the display black.
 screen_change:
 	ld hl,blank_req
 	ld a,(hl)
 	ld (hl),0
 	or a
-	jr nz,sc_new
+	jr nz,sc_start
 	ld a,(mode_rows)
 	cp 5
-	jr c,sc_nochange
-sc_new:
-	ld a,$FF
-	ld (calm_flips),a
+	jr c,sc_stable
+	ld a,(busy_vbls)
+	cp 150
+	ret nc                       ; timeout: keep display on until rows settle
+	ld a,(calm_flips)
+	cp $FF
+	jr z,sc_wait
+	jr sc_start
+sc_stable:
+	ld a,(busy_vbls)
+	cp 150
+	jr nz,sc_wait
 	xor a
-	ld (settle),a
-	ld (settle_time),a
-	ret
-sc_nochange:
+	ld (busy_vbls),a             ; clear timeout latch once rows settle
+sc_wait:
 	ld a,(calm_flips)
 	cp $FF
 	ret nz
-	ld hl,settle_time
-	inc (hl)
-	ld a,(hl)
-	cp 150
-	jr nc,sc_done
+	ld a,(mode_rows)
+	cp 5
+	ret nc
 	ld hl,(dbg_cnt)
 	ld de,60
 	or a
@@ -977,10 +978,22 @@ sc_nochange:
 	jr c,sc_calm
 	ld (hl),0
 	ret
+sc_start:
+	ld a,$FF
+	ld (calm_flips),a
+	xor a
+	ld (settle),a
+	ld (busy_vbls),a
+	ret
 sc_calm:
 	inc (hl)
+	if MSX2PLUS
+	ld a,(hl)
+	cp 60
+	else
 	ld a,(hl)
 	cp 10
+	endif
 	ret c
 sc_done:
 	ld a,1                      ; show the next page after this one

@@ -112,6 +112,12 @@ r_sci_done:
 	ld a,(flip_pending)
 	xor 1
 	ld (SH_EARLY),a
+	ld a,(calm_flips)
+	inc a
+	jr nz,rf_page_ready
+	xor a
+	ld (SH_EARLY),a             ; keep redraws off the visible page during a mode change
+rf_page_ready:
 	ld a,(page_back)
 	ld (SH_CUR_PG),a
 	xor a

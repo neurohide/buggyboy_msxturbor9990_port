@@ -74,14 +74,15 @@ tla_loop:
 	ld a,(hl)
 	inc hl
 	ld h,(hl)
-	ld l,a                      ; event line
-	ex de,hl
-	push hl
-	or a
-	sbc hl,de                   ; target - event
-	pop hl
-	ex de,hl
-	jr c,tla_done               ; event after target
+	ld l,a                      ; HL = event line, DE = target line
+	ld a,d
+	cp h
+	jr c,tla_done               ; target before event
+	jr nz,tla_advance
+	ld a,e
+	cp l
+	jr c,tla_done
+tla_advance:
 	ld hl,(tl_ptr)
 	ld (rec_cur),hl
 	ld bc,TL_REC
@@ -176,6 +177,16 @@ rs_nbm:
 rs_den:
 	ld a,b
 	ld (row_mode),a
+	ld a,(row_mode)
+	cp 1                          ; multicolour text uses row-local D022/D023
+	jr nz,rs_live_bg
+	ld a,(ix+$22)
+	call fix_slot
+	ld (SH_BG1),a
+	ld a,(ix+$23)
+	call fix_slot
+	ld (SH_BG2),a
+rs_live_bg:
 	; text rows below a handler's D021 change: background pixels use that colour's
 	; slot instead of slot 0 (the live top-of-frame colour)
 	ld a,(kb_n0)                ; race (kerb chain set up): its D021 bands are not row

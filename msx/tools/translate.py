@@ -713,6 +713,8 @@ class Gen:
             self.out.extend(l.rstrip() for l in open(os.path.join(NATIVE_DIR, 'n289c.asm'))
                             if l.strip() and not l.lstrip().startswith(';'))
         self.out.append('%s:\t\t\t; %04X %s %s' % (L(a), a, text, mode))
+        if a == 0x3502:  # translated road drawer's final RTS
+            self.out.extend(('if MSX2PLUS', '\tcall race_ready', 'endif'))
         if a == MAIN_LOOP:
             # game-loop pass: its new state is worth one render (flags preserved)
             # game-loop pass: hold passes to one per PACE_VBLS vblanks (steady game

@@ -319,8 +319,7 @@ se_decay:
 	cp d
 	jr nc,se_hold
 	ld a,(ix+5)
-	call env_rate
-	call div3_hl
+	call env_rate_third
 	ex de,hl
 	or a
 	sbc hl,de
@@ -335,8 +334,7 @@ se_hold:
 	jr se_store
 se_release:
 	ld a,(ix+6)
-	call env_rate
-	call div3_hl
+	call env_rate_third
 	ex de,hl
 	or a
 	sbc hl,de
@@ -359,6 +357,22 @@ se_store:
 	ld a,d
 	ret
 
+; A low nibble = SID rate index -> HL = one-third level increment (8.8)
+env_rate_third:
+	and $0F
+	add a,a
+	ld l,a
+	ld h,0
+	push de
+	ld de,env_rates_third
+	add hl,de
+	pop de
+	ld a,(hl)
+	inc hl
+	ld h,(hl)
+	ld l,a
+	ret
+
 ; A low nibble = SID rate index -> HL = level increment per frame (8.8)
 env_rate:
 	and $0F
@@ -374,36 +388,11 @@ env_rate:
 	ld h,(hl)
 	ld l,a
 	ret
-div3_hl:                        ; HL = HL/3 (approx: *85/256)
-	push de
-	ld d,h
-	ld e,l
-	srl h
-	rr l
-	srl h
-	rr l                        ; /4
-	push hl
-	srl h
-	rr l
-	srl h
-	rr l                        ; /16
-	pop de
-	add hl,de                   ; /4 + /16
-	ld d,h
-	ld e,l
-	srl h
-	rr l
-	srl h
-	rr l
-	srl h
-	rr l
-	srl h
-	rr l
-	add hl,de                   ; *(1+1/16)
-	pop de
-	ret
 ; 15*256*20ms / attack time (2,8,16,24,38,56,68,80,100,250,500,800,1000,3000,5000,8000 ms)
 env_rates:
 	dw 38400, 9600, 4800, 3200, 2021, 1371, 1129, 960
 	dw 768, 307, 154, 96, 77, 26, 15, 10
+env_rates_third:
+	dw 12750, 3187, 1593, 1062, 670, 453, 374, 318
+	dw 255, 100, 49, 31, 24, 7, 3, 2
 

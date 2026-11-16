@@ -46,7 +46,6 @@ int_hline:
 	; (anchoring only at vblank lags whenever the vblank was served late)
 	xor a
 	out (TIMER_LO),a
-	endif
 	ld hl,267                   ; border slot: V9990 line 222
 	ld a,(sli_bord)
 	or a
@@ -121,6 +120,7 @@ ih_late:
 	and 1
 	ld (irq_line+1),a
 	jr ih_again
+	endif                       ; (MSX2+: int_hline only acknowledges)
 
 if MSX2PLUS
 ;  Arm the V9990 line IRQ at the C64 compare line (soft_target).  The
@@ -149,24 +149,31 @@ ivb_nokb:
 	ld a,(flip_pending)
 	or a
 	jr z,ivb_noflip
+	ld a,(calm_flips)
+	inc a
+	jr z,ivb_noflip          ; keep the visible page while a new screen is built
 	xor a
 	ld (flip_pending),a
+	ld a,(busy_vbls)
+	cp 150
+	jr nc,ivb_busy_keep         ; preserve the timeout latch across page flips
+	ld a,(calm_flips)
+	inc a
+	jr z,ivb_busy_keep          ; preserve blank-transition time across flips
+	xor a
 	ld (busy_vbls),a
-	; pages from a big redraw (screen change) stay hidden, see render.asm
+ivb_busy_keep:
 	ld a,8
 	out (V_SEL),a
 	ld hl,calm_flips
 	ld a,(hl)
 	or a
-	ld a,$C2                    ; display on
 	jr z,ivb_disp
-	ld a,(hl)
 	inc a
-	jr z,ivb_off                ; $FF: screen being built, stay blank
+	jr z,ivb_disp              ; $FF: hold front page; renderer builds the back page
 	dec (hl)
-ivb_off:
-	ld a,$42                    ; display off (backdrop)
 ivb_disp:
+	ld a,$C2                    ; keep the last complete page visible
 	out (V_REG),a
 ivb_flip:
 	ld a,17
@@ -178,6 +185,16 @@ ivb_flip:
 	xor 1
 	ld (page_back),a
 ivb_noflip:
+	if MSX2PLUS
+	ld a,(race_wait)
+	or a
+	jr z,ivb_notwait
+	ld a,8
+	out (V_SEL),a
+	ld a,$C2                    ; show the last complete page during race setup
+	out (V_REG),a
+ivb_notwait:
+	endif
 	if MSX2PLUS=0
 	xor a
 	out (TIMER_LO),a            ; raster clock restarts at C64 line 257
@@ -189,6 +206,35 @@ ivb_noflip:
 	endif
 	ld hl,frame_count
 	inc (hl)
+	if MSX2PLUS
+	ld a,(race_wait)
+	or a
+	jr z,ivb_timeout_check
+	ld hl,busy_vbls
+	inc (hl)
+	jr nz,ivb_timeout_done
+	ld hl,race_wait
+	inc (hl)                    ; release after about 15 seconds if no road draw returns
+	ld a,(hl)
+	cp 4
+	jr c,ivb_timeout_done
+	call race_ready
+	jr ivb_timeout_done
+ivb_timeout_check:
+	endif
+	ld a,(calm_flips)
+	inc a
+	jr nz,ivb_timeout_done
+	ld hl,busy_vbls
+	inc (hl)
+	ld a,(hl)
+	cp 150
+	jr c,ivb_timeout_done
+	xor a
+	ld (calm_flips),a           ; release blank after 150 vblanks
+	ld a,150
+	ld (busy_vbls),a            ; suppress repeat blanking until rows settle
+ivb_timeout_done:
 	if MSX2PLUS=0
 	call vbl_catchup
 	endif
@@ -264,6 +310,11 @@ ivb_swap:
 	call tl_base_snapshot
 	call vbl_border
 ivb_decide:
+	if MSX2PLUS
+	ld a,(race_wait)
+	or a
+	ret nz                      ; give setup all CPU until the first road draw
+	endif
                        ; starts with the colour of the line-0 handler
 	; The game's main loop only gets the CPU the renderer leaves free (it fell
 	; to ~2 iterations/s while the renderer ran at every vblank).  Render only
@@ -329,6 +380,11 @@ sli_zero:
 ; environment as the vblank ISR gives it: C64 block 3 in page 3 (page 2 holds
 ; block 2 in main code already).  Keeps BC, DE, HL (A is the caller's scratch).
 k_render_now:
+	if MSX2PLUS
+	ld a,(race_wait)
+	or a
+	ret nz
+	endif
 	push bc
 	push de
 	push hl
@@ -345,6 +401,24 @@ k_render_now:
 	pop de
 	pop bc
 	ret
+
+if MSX2PLUS
+; Called when either road drawer finishes. Preserve the translated 6502 state.
+race_ready:
+	push af
+	ld a,(race_wait)
+	or a
+	jr z,rr_done
+	xor a
+	ld (race_wait),a
+	ld (calm_flips),a
+	ld (blank_req),a
+	ld a,150
+	ld (busy_vbls),a            ; first full redraw can show immediately
+rr_done:
+	pop af
+	ret
+endif
 
 ; A raster IRQ armed for a visible line that the beam has already passed was
 ; missed (the line was programmed a moment too late): run the C64 handlers
