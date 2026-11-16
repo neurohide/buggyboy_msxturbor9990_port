@@ -35,7 +35,7 @@ k_rwait:
 	call get_raster
 	ld d,l                      ; previous low byte
 krw_l:
-	call get_raster
+	call get_raster_step
 	ld a,l
 	cp e
 	jr z,krw_hit

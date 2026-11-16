@@ -116,7 +116,7 @@ iord_ff:
 	ret
 iord_d011:
 	call mt_poll
-	call get_raster
+	call get_raster_step
 	ld a,h
 	rrca
 	and $80
@@ -129,7 +129,7 @@ iord_d011:
 	ret
 iord_d012:
 	call mt_poll
-	call get_raster
+	call get_raster_step
 	pop af
 	ret
 iord_d019:
@@ -167,7 +167,48 @@ iord_d01f:
 	ret
 
 ; current C64 raster line -> HL (0..311).  Clobbers A.
+; MSX2+: the game's raster reads move the clock one line on per read
+; (no free-running timer), so polling loops waiting for an exact line
+; still see it.  C64 IRQ handlers read without stepping: the main loop
+; must still see their line.
+get_raster_step:
+	if MSX2PLUS
+	ld hl,(irq_line)            ; handler run by vbl_catchup: report the line it was
+	ld a,(in_irq)               ; raised for (e.g. $0C91 picks its split half by D012)
+	or a
+	ret nz
+	call get_raster             ; read, then step
+	push hl
+	ld hl,(ras_sub)
+	inc hl
+	ld a,h
+	dec a
+	jr nz,grs_ok
+	ld a,l
+	cp 312-256
+	jr c,grs_ok
+	dec h                       ; a whole frame on: wrap (H was 1)
+	ld l,h
+grs_ok:
+	ld (ras_sub),hl
+	pop hl
+	ret
+	endif
 get_raster:
+	if MSX2PLUS
+	push de
+	ld de,(ras_sub)
+	ld hl,(raster_base)
+	add hl,de
+	ld de,-312
+	add hl,de
+	jr c,gr_m2p
+	ld de,312
+	add hl,de
+gr_m2p:
+	pop de
+	ret
+	else
 	push de
 	in a,(TIMER_HI)
 	ld h,a
@@ -207,6 +248,7 @@ gr_wrap:
 	add hl,de
 	pop de
 	ret
+	endif
 
 ; 16-bit Galois LFSR -> A
 k_random:

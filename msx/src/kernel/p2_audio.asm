@@ -17,6 +17,20 @@ pi_l:
 	out ($A0),a
 	ld a,$BF                    ; all off, port A input / B output
 	out ($A1),a
+	ld hl,SPC_KEY               ; period cache: freq 0 -> clamp period $0FFF
+	ld b,6
+pi_k:
+	ld (hl),0
+	inc hl
+	djnz pi_k
+	ld hl,SPC_VAL
+	ld b,3
+pi_v:
+	ld (hl),$FF
+	inc hl
+	ld (hl),$0F
+	inc hl
+	djnz pi_v
 	ret
 
 psg_write:                      ; register A, value L
@@ -26,6 +40,22 @@ psg_write:                      ; register A, value L
 	ret
 
 sound_frame:
+	; odd vblanks: advance the envelopes only (same rate), skip the PSG synthesis
+	ld a,(frame_count)
+	rrca
+	jr nc,sf_full
+	ld c,0
+	ld ix,SID_REGS
+sf_eo:
+	call sid_envelope
+	ld de,7
+	add ix,de
+	inc c
+	ld a,c
+	cp 3
+	jr nz,sf_eo
+	ret
+sf_full:
 	ld a,$BF                    ; mixer: start with everything off
 	ld (k_tmp),a
 	ld c,0                      ; voice
@@ -53,7 +83,7 @@ sf_voice:
 	; tone period = 1905600 / F
 	ld l,(ix+0)
 	ld h,(ix+1)
-	call sid_period             ; HL = PSG period (12 bit)
+	call sid_period_c           ; HL = PSG period (12 bit)
 	ld a,c
 	add a,a
 	push hl
@@ -143,6 +173,57 @@ m44_d:
 	rrca
 	rrca
 	and $0F
+	pop bc
+	ret
+
+; sid_period with a per-voice (C) cache: the division reruns only when the
+; voice frequency changed.  shortcut: SPC_VAL lives in unused SID shadow
+; $5A-$5F, a game write there would corrupt the cache; none is expected.
+sid_period_c:
+	push bc
+	ld a,c
+	add a,a
+	ld b,a                      ; B = 2*voice
+	add a,SPC_KEY & 255
+	ld e,a
+	ld d,SPC_KEY/256
+	ld a,(de)
+	cp l
+	jr nz,spc_miss
+	inc de
+	ld a,(de)
+	cp h
+	jr nz,spc_miss1
+	ld a,SPC_VAL & 255
+	add a,b
+	ld l,a
+	ld h,SPC_VAL/256
+	ld a,(hl)
+	inc hl
+	ld h,(hl)
+	ld l,a
+	pop bc
+	ret
+spc_miss:
+	inc de
+spc_miss1:
+	ld a,h
+	ld (de),a
+	dec de
+	ld a,l
+	ld (de),a
+	call sid_period
+	push hl
+	ld a,SPC_VAL & 255
+	add a,b
+	ld e,a
+	ld d,SPC_VAL/256
+	ld a,l
+	ld (de),a
+	inc de
+	ld a,h
+	ld (de),a
+	pop hl
 	pop bc
 	ret
 

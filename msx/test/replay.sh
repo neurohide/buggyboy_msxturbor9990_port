@@ -33,6 +33,12 @@ proc tick {s} {
 after time 1 { tick 1 }
 foreach t {$SHOTS} { after time \$t [list screenshot "${OUT}_s\$t.png"] }
 TCL
-"${OPENMSX:-openmsx}" -machine Panasonic_FS-A1GT -ext gfx9000 \
+# machine follows the build: MSX2+ (FS-A1WSX + 1 MB mapper) or turbo R
+if grep -q 'MSX2PLUS: equ 1' "$HERE/build/config.inc"; then
+  MACH=${MACHINE:--machine Panasonic_FS-A1WSX -ext ram1mb}
+else
+  MACH=${MACHINE:--machine Panasonic_FS-A1GT}
+fi
+"${OPENMSX:-openmsx}" $MACH -ext gfx9000 \
   -cart "$HERE/build/buggyboy.rom" -romtype ASCII16 -script "$OUT.tcl" > "$OUT.log" 2>&1
 awk '$3>0 && $3<50 {n++; a+=$2; m+=$3} END{if (n) printf "in-race %.2f fps, main loop %.2f/s over %d s\n", a/n, m/n, n; else print "no in-race seconds"}' "${OUT}_sec.txt"

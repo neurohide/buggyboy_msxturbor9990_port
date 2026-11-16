@@ -68,16 +68,39 @@ k_jpix:
 ; Hash table built by tools/build.py: slot = (lo + 7*hi) & 127, linear probing.
 k_lookup:
 	push de
-	ld a,(lu_cache)
+	ld a,l
+	xor h
+	and 1
+	ld e,a
+	add a,a
+	add a,a
+	add a,e                     ; 5 * index
+	add a,LU_CACHE & 255
+	ld e,a
+	ld d,LU_CACHE/256
+	ld a,(de)
 	cp l
 	jr nz,klu_scan
-	ld a,(lu_cache+1)
+	inc de
+	ld a,(de)
 	cp h
 	jr nz,klu_scan
-	ld ix,(lu_cache+3)
-	ld a,(lu_cache+2)
+	inc de
+	ld a,(de)                   ; segment
+	push af
+	inc de
+	ld a,(de)
+	inc de
+	push af
+	ld a,(de)
+	ld d,a
+	pop af
+	ld e,a
+	push de
+	pop ix
+	pop af
 	pop de
-	ret
+	ret                         ; HL untouched, as before the cache grew
 klu_scan:
 	ld a,h
 	add a,a
@@ -86,15 +109,20 @@ klu_scan:
 	sub h
 	add a,l
 	and LOOKUP_SLOTS-1
-	ld e,a
-	ld d,0
-	ld ix,LOOKUP_HASH
-	add ix,de
-	add ix,de
-	add ix,de
-	add ix,de
-	add ix,de
-	add ix,de                   ; slot * 6
+	push hl                     ; key
+	ld l,a
+	ld h,0
+	add hl,hl                   ; 2s
+	ld d,h
+	ld e,l
+	add hl,hl                   ; 4s
+	add hl,de                   ; 6s
+	ld de,LOOKUP_HASH
+	add hl,de
+	push hl
+	pop ix
+	pop hl
+	ld e,a                      ; slot
 klu_loop:
 	ld a,(ix+1)
 	or a
@@ -119,14 +147,36 @@ klu_step:
 	pop de
 	jr klu_loop
 klu_found:
+	ld a,l
+	xor h
+	and 1
+	ld e,a
+	add a,a
+	add a,a
+	add a,e
+	add a,LU_CACHE & 255
+	ld e,a
+	ld d,LU_CACHE/256           ; DE -> cache entry
+	ld a,l
+	ld (de),a
+	inc de
+	ld a,h
+	ld (de),a
+	inc de
 	ld a,(ix+2)
+	ld (de),a
+	inc de
+	push af
+	ld a,(ix+3)
+	ld (de),a
+	inc de
+	ld a,(ix+4)
+	ld (de),a
 	ld e,(ix+3)
 	ld d,(ix+4)
-	ld (lu_cache),hl
-	ld (lu_cache+2),a
-	ld (lu_cache+3),de
 	push de
 	pop ix
+	pop af
 	pop de
 	ret
 klu_fail:

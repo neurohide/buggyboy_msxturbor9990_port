@@ -15,6 +15,9 @@ LD_VARS:         equ $C110           ; outside the intro's C000/E000 work areas
 ld_romslot:      equ LD_VARS+0
 ld_ramprim:      equ LD_VARS+1       ; primary slot of RAM
 ld_ramsub:       equ LD_VARS+2       ; secondary slot of RAM ($FF = not expanded)
+ld_probe31:      equ LD_VARS+3
+ld_probe63:      equ LD_VARS+4
+ld_probe_ok:     equ LD_VARS+5
 TRAMPOLINE:      equ $2700           ; free hole in SEG_C0
 
 	org $4000
@@ -25,9 +28,11 @@ loader_start:
 	defs 6,0
 
 ld_init:
-	; R800 ROM mode (keeps all mapper RAM for us)
+	if MSX2PLUS=0
+	; Turbo R R800 ROM mode keeps all mapper RAM available.
 	ld a,$81
 	call CHGCPU
+	endif
 	; slot of this cartridge (page 1)
 	call RSLREG
 	rrca
@@ -70,13 +75,8 @@ ld_init:
 	and 3
 ld_noexp:
 	ld (ld_ramsub),a
-	; Run the intro before copying the game images. Its variables and IM2
-	; table live in page-3 RAM, and the RAM trampoline survives the bank swap.
-	ld hl,ld_intro_stub
-	ld de,INTRO_STUB
-	ld bc,ld_intro_stub_end-ld_intro_stub
-	ldir
-	jp INTRO_STUB
+	; Skip the optional intro and proceed directly to game image setup.
+	jp ld_after_intro
 ld_after_intro:
 	; our ROM in page 2 as well
 	ld a,(ld_romslot)
@@ -100,6 +100,69 @@ ld_after_intro:
 	or b
 	ld ($FFFF),a
 ld_p0done:
+	; Require 64 mapper segments (1 MB). Probe banks 31 and 63 without
+	; leaving their original first bytes changed.
+	xor a
+	ld (ld_probe_ok),a
+	ld a,31
+	out (PORT_P0),a
+	ld a,($2F00)
+	ld (ld_probe31),a
+	ld a,63
+	out (PORT_P0),a
+	ld a,($2F00)
+	ld (ld_probe63),a
+	ld a,31
+	out (PORT_P0),a
+	ld a,$A5
+	ld ($2F00),a
+	ld a,63
+	out (PORT_P0),a
+	ld a,$5A
+	ld ($2F00),a
+	ld a,31
+	out (PORT_P0),a
+	ld a,($2F00)
+	cp $A5
+	jr nz,ld_probe_restore
+	ld a,63
+	out (PORT_P0),a
+	ld a,($2F00)
+	cp $5A
+	jr nz,ld_probe_restore
+	ld a,1
+	ld (ld_probe_ok),a
+ld_probe_restore:
+	ld a,63
+	out (PORT_P0),a
+	ld a,(ld_probe63)
+	ld ($2F00),a
+	ld a,31
+	out (PORT_P0),a
+	ld a,(ld_probe31)
+	ld ($2F00),a
+	ld a,(ld_probe_ok)
+	or a
+	jr nz,ld_probe_done
+	; Return page 0 to BIOS and explain the requirement before stopping.
+	ld a,($FFFF)
+	or 3
+	ld ($FFFF),a
+	in a,($A8)
+	and $FC
+	out ($A8),a
+	ld hl,ld_ram_error
+ld_ram_error_loop:
+	ld a,(hl)
+	or a
+	jr z,ld_ram_error_stop
+	inc hl
+	call $00A2
+	jr ld_ram_error_loop
+ld_ram_error_stop:
+	ld a,1
+	jr ld_ram_error_stop
+ld_probe_done:
 	; copy every image
 	ld hl,ld_table
 ld_copy:
@@ -197,6 +260,9 @@ ld_table:
 	db 9, SEG_CODE+3
 	db 10, SEG_SHADOW
 	db 0
+
+ld_ram_error:
+	db "1 MB mapper RAM required in page 3",13,10,0
 
 loader_end:
 	defs $8000-loader_end,$FF

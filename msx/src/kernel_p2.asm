@@ -12,6 +12,5 @@ region_k2_start:
 	include "src/kernel/p2_raster_irq.asm"
 	include "src/kernel/p2_v9990.asm"
 	include "src/kernel/p2_input.asm"
-	include "src/kernel/p2_audio.asm"
 	include "build/dispatch.asm"
 region_k2_end:

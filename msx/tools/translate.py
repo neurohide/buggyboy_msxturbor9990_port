@@ -761,7 +761,19 @@ class Gen:
         # carry held in the Z80 flag and needed after (or by) this instruction
         self.keepc = self.cs in ('P', 'Z') and bool((lo & C) or mn in ('adc', 'sbc', 'rol', 'ror'))
 
-        if mn == 'lda':
+        if mn == 'lda' and mode == 'abs' and v == 0xD011 and not ramio and \
+                tr.ins.get(a + n, (0, ''))[1:4] == ('and', 'imm', 0x80) and \
+                tr.ins.get(a + n + 2, (0, ''))[1] == 'beq' and tr.ins[a + n + 2][3] == a:
+            # "wait for raster line 256+": also return once a vblank went by
+            # (the renderer may hold the CPU across the whole bottom border).
+            # A = $80, NZ: the and/beq that follow fall through.
+            self.emit('call k_vwait')
+        elif mn == 'lda' and mode == 'abs' and v == 0xD012 and not ramio and \
+                tr.ins.get(a + n, (0, ''))[1] == 'bne' and tr.ins[a + n][3] == a:
+            # "wait for raster line 0": as cmp $D012 below, also return when
+            # line 0 went by while the CPU was elsewhere.  A = 0, Z set.
+            self.emit('xor a', 'call k_rwait')
+        elif mn == 'lda':
             if mode in ('zp', 'abs') and addr_class(v, ramio) == 'direct' and a not in SMC_OPERAND:
                 self.emit('ld a,($%04X)' % v)
             else:

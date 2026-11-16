@@ -99,6 +99,7 @@ sc_n:            equ RV+$A4          ; number of entries in sc_live
 sc_in:           equ $6C00           ; 128 membership flags (free above SCACHE)
 sc_live:         equ $6C80           ; 128 slot numbers, sc_n entries
 SH_EARLY:        equ SH_CUR_PG+1     ; 1: rows were synced to the back page during this render
+SH_BGS:          equ $F169           ; 1: background palette slot of the row being set up
 SH_XOFF:         equ $F150           ; last rendered horizontal offset for each row
 ; changed x span of each clean row, 4-pixel units from SCREEN_X, [lo, hi)
 SPAN_LO:         equ $F180           ; this frame (valid where SH_ROWS is set)

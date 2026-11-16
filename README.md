@@ -1,10 +1,10 @@
-# Buggy Boy: C64 → MSX turbo R + V9990
+# Buggy Boy: C64 → MSX2+ + V9990
 
 An educational study in porting a Commodore 64 game to the MSX. The 6502
 code of the C64 version of *Buggy Boy* is not emulated: it is **statically
-translated** to Z80/R800 code. A small kernel stands in for the C64
-hardware (VIC-II, SID, CIA, raster interrupts) on an MSX turbo R (R800,
-memory mapper) with a V9990 (Gfx9000 or compatible) as the display.
+translated** to Z80 code. A small kernel stands in for the C64 hardware
+(VIC-II, SID, CIA, raster interrupts) on an MSX2+ with a 1 MB memory mapper
+and a V9990 (Gfx9000 or compatible) as the display.
 
 **Please read the [disclaimer](DISCLAIMER.md) first.** This is a
 non-commercial project for learning. It is not affiliated with or endorsed
@@ -15,7 +15,7 @@ by the owners of *Buggy Boy*.
 <table>
   <tr>
     <th>Commodore 64 (original)</th>
-    <th>MSX turbo R + V9990 (this port)</th>
+    <th>MSX2+ + V9990 (this port)</th>
   </tr>
   <tr>
     <td><img src="docs/screenshots/c64-title.png" width="400" alt="C64 title screen"></td>
@@ -38,7 +38,7 @@ by the owners of *Buggy Boy*.
 | `disasm/` | da65 disassembly of the C64 game (`game.s`) and its loader intro (`intro.s`), with the `.info` files that drive da65. `game.s` is the input of the translator. |
 | `tools/` | Reverse-engineering helpers used to produce `disasm/`. |
 | `msx/` | The MSX port: translator, kernel, V9990 renderer, loader and tests. |
-| `intro/` | Original MSX2 intro (SCREEN 5 wave parallax, sine scroller, PSG music). It runs before the game and asks you to switch to the V9990 output. |
+| `intro/` | Original MSX2 intro (SCREEN 5 wave parallax, sine scroller, PSG music), still packed in the ROM but skipped by the loader. |
 | `docs/` | Screenshots. |
 
 The renderer source is split into focused files under `msx/src/render/`.
@@ -53,8 +53,8 @@ memory region contiguous for the build tool.
 - `make`
 - `z80asm`, the Z80 assembler by Bas Wijnen (packaged as `z80asm` by most
   distributions). Other assemblers of the same name will not work.
-- [openMSX](https://openmsx.org/) to run the result, with the system ROMs
-  for the Panasonic FS-A1GT (turbo R) installed.
+- [openMSX](https://openmsx.org/) to run the result, with MSX2+, `ram1mb`,
+  and `gfx9000` configured.
 
 ### Build the game ROM
 
@@ -91,20 +91,20 @@ reverse engineering from an original C64 program file.
 
 ## Running
 
-In openMSX, with a turbo R and the Gfx9000 extension:
+In openMSX, select an MSX2+ machine configuration with the 1 MB mapper
+available as page-3 RAM, and enable the Gfx9000 extension:
 
     cd msx
-    openmsx -machine Panasonic_FS-A1GT -ext gfx9000 -cart build/buggyboy.rom -romtype ASCII16
+    openmsx -ext ram1mb -ext gfx9000 -cart build/buggyboy.rom -romtype ASCII16
 
-The ROM first plays the MSX2 intro on the normal MSX video output. After its
-key prompt returns to the game, switch the active video output to the V9990
+The ROM skips the MSX2 intro and proceeds directly to the game. Switch the
+active video output to the V9990
 (`set videosource GFX9000` in the openMSX console, or select Gfx9000 in its
 menu). The game then shows its title/high-score screen. Press SPACE or
-joystick button 1 there to start racing; the key used to leave the intro does
-not also start the race.
+joystick button 1 there to start racing.
 
-On real hardware you need a turbo R (256K+ mapper RAM), a V9990 cartridge,
-and the ROM in an ASCII16 MegaROM cartridge.
+On real hardware you need an MSX2+ with a 1 MB memory mapper selected as the
+RAM in page 3, a V9990 cartridge, and the ROM in an ASCII16 MegaROM cartridge.
 
 Controls: joystick in port 1, or cursor keys + SPACE (fire).
 STOP = pause (C64 RUN/STOP), ESC = C64 "←" key.
@@ -117,8 +117,8 @@ STOP = pause (C64 RUN/STOP), ESC = C64 "←" key.
 | Translator | `msx/tools/translate.py` | 6502 → Z80: A→A, X→E (D=0), Y→C (B=0), N/Z→S/Z, carry polarity tracked lazily, flag liveness analysis, self-modifying operands read at run time. JMP-connected code stays in one 16K segment; JSR across segments goes through `k_farcall`. |
 | Kernel | `msx/src/kernel_p0.asm`, `msx/src/kernel_p2.asm`, `msx/src/kernel/` | Lives in C64 pages that only held 6502 code. Handles IM2 interrupt entry, memory helpers, VIC/SID/CIA emulation, raster timing, far calls, dispatch, SID→PSG audio, and input. The page-0 and page-2 kernels are split into files grouped by function. |
 | Renderer | `msx/src/render.asm`, `msx/src/render/` | Own mapper segment, runs at V9990 vblank. Draws dirty C64 cells (text, multicolour, bitmap) into V9990 B3 (512×212, 4bpp) at 3 pixels per C64 multicolour pixel, so the full 40-column screen fits with the right aspect ratio. Sprites are cached as shapes in VRAM and blitted, and the display is double buffered. |
-| Intro | `intro/` | ROM bank 15, assembled for page 1. The loader maps it in from a RAM stub and calls its key entry (`$4010`, returns after a key press and release) on the Z80, before anything else. |
-| Loader | `msx/src/loader.asm` | ROM bank 0: runs the intro, switches to R800, copies the images into mapper segments, takes over all four pages. |
+| Intro | `intro/` | Original MSX2 intro, still packed into ROM bank 15; the loader skips it. |
+| Loader | `msx/src/loader.asm` | ROM bank 0: checks for a 1 MB mapper in page 3, copies the images into mapper segments, and takes over all four pages. |
 
 Memory while the game runs: page 0 = C64 $0000-$3FFF, page 1 = translated
 code (banked), page 2 = C64 $8000-$BFFF, page 3 = C64 $C000-$FFFF. The VIC
@@ -174,14 +174,14 @@ those addresses to identify game code.
 
 ## Tests
 
-Run from `msx/`. The intro waits for a key, so a test has to press one
-(about 7 s after boot, once the intro is running) before the game starts.
+Run from `msx/`. The loader now skips the intro, so the game starts without a
+timed key press.
 
 - `test/run.sh <seconds> <out-prefix> [tcl]` boots the ROM headless in
   openMSX, optionally runs extra Tcl (key presses, breakpoints), samples the
   PC every 0.5 ms and prints a profile (`tools/symmap.py`,
   `tools/profgroup.py`).
-- `test/mkdrive.sh <dir>` writes a Tcl script that leaves the intro, drives
+- `test/mkdrive.sh <dir>` writes a Tcl script that starts the race, drives
   the buggy and measures the game's frame rate.
 
 Debugging helpers in `msx/tools/`: `trace_samples.py` (PC samples in time

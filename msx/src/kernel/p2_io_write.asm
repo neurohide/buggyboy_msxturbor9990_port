@@ -85,6 +85,18 @@ iowr_vic:
 	ld h,VIC_REGS/256
 	pop af
 	push af
+	push bc
+	ld b,a
+	ld a,l
+	cp $11
+	jr nz,iowr_vic_old
+	ld a,(hl)
+	xor b
+	and $78                    ; D011 display mode bits, not scroll/raster compare
+	ld (k_tmp),a
+iowr_vic_old:
+	ld a,b
+	pop bc
 	cp (hl)
 	ld (hl),a
 	ld a,l
@@ -107,9 +119,24 @@ iowr_vic_new:
 	ld a,PAL_BORDER+1
 iowr_bg:
 	dec a
+	if MSX2PLUS
+	jr nz,iob_live
+	ld a,(in_irq)               ; D021 from a C64 handler (vbl_catchup, beam on the
+	or a                        ; top rows): the timeline and top_col carry it
+	jr nz,iob_skip
+iob_live:
+	ld a,l
+	sub $21                     ; slot again: 0 = D021 (L = $21..$23, border $20)
+	jr nc,iob_go
+	ld a,PAL_BORDER
+iob_go:
+	endif
 	pop hl                      ; H = value written
 	push hl
 	call k_setlive              ; slot A, colour H
+iob_skip:
+	ld a,1                      ; colour split: the next timeline snapshot records it
+	ld (vic_changed),a
 	pop af
 	ret
 ivn_rest:
@@ -129,6 +156,9 @@ ivn_rest:
 iowr_d011:
 	ld a,1
 	ld (vic_changed),a
+	ld a,(k_tmp)
+	and $78                    ; only display-mode changes require a blank redraw
+	jr z,iowr_d012
 	ld a,(in_irq)
 	or a
 	jr nz,iowr_d012

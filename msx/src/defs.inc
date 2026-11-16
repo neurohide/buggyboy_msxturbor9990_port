@@ -1,4 +1,4 @@
-; Shared constants for the MSX turbo R / V9990 port of C64 Buggy Boy.
+; Shared constants for the MSX / V9990 port of C64 Buggy Boy.
 ; `equ` assigns a name to a value and emits no bytes. Keep this file as the
 ; common vocabulary for the kernel, renderer, loader, and translated game.
 
@@ -27,7 +27,7 @@ V_STAT:          equ $65             ; P#5 status
 V_INT:           equ $66             ; P#6 interrupt flags
 V_SYS:           equ $67             ; P#7 system control
 
-; ---- turbo R system timer (3.911 us per tick) ------------------------------
+; ---- Turbo R timer (used by the legacy Turbo R build only) -----------------
 TIMER_LO:        equ $E6
 TIMER_HI:        equ $E7
 
@@ -87,6 +87,7 @@ irq_count:       equ KVARS+$B4       ; 2 bytes
 vbl_pending:     equ KVARS+$B6
 cur_p3:          equ KVARS+$B7       ; mapper segment in page 3
 irq_late:        equ KVARS+$B8       ; raster line armed after it had passed
+LU_CACHE:        equ $3060           ; 2 x 5 (free RAM after kb_list; was $8DD4 at the k2 end): direct-mapped k_lookup cache (C64 lo, hi, seg, Z80 addr); 0 = empty
 lu_cache:        equ KVARS+$B9       ; 5: last k_lookup (C64 addr, seg, Z80 addr)
 page_back:       equ KVARS+$BE       ; display page being drawn (0/1)
 flip_pending:    equ KVARS+$BF       ; back page complete: show it at vblank
@@ -107,8 +108,16 @@ kb_n:            equ KVARS+$D7       ; kerb bands left in the native line-IRQ ch
 kb_ptr:          equ KVARS+$D8       ; 2: next kb_list entry (its C64 line)
 pace_due:        equ KVARS+$DA       ; frame_count when the next race-loop pass is due
 pace_np:         equ KVARS+$DB       ; race-loop passes skipped since the last render
+soft_target:     equ KVARS+$DC       ; MSX2+ C64 raster line scheduled on the V9990
+ras_sub:         equ sli_last        ; MSX2+: 2: lines added to raster_base by raster reads since the last IRQ (0..311)
+vc_last:         equ KVARS+$DE       ; MSX2+: 2: frame-order key of the last handler run by vbl_catchup
+kb_n0:           equ KVARS+$A7       ; MSX2+: bands in the last kb_start list (odd-frame replay)
+kb_fok:          equ KVARS+$A9       ; MSX2+: 1 = kerb colours alternate: k_int_kb fast path
+top_col:         equ KVARS+$A8       ; MSX2+: D021 at the top of the frame (re-applied on odd vblanks)
+RASTER_LAST:     equ 301             ; MSX2+: last C64 line with a V9990 line IRQ (V9990 256)
+CHAIN_MASK:      equ 1               ; MSX2+: the C64 IRQ chain runs when frame_count & CHAIN_MASK == 0 (1 = every 2nd vblank, 3 = every 4th)
 PACE_VBLS:       equ 4               ; vblanks per race-loop pass (C64 original: ~6)
-kb_list:         equ $3040           ; 23: (line, colour) per chained band, then band 12's line
+kb_list:         equ $3040           ; 27: (line, colour) per chained band, then band 12's line
 ; KVARS+$E0..: C64 page-3 variables relocated by translate.py RELOC ($FB2A)
 
 ; The interrupt code writes one event record per raster change. Two buffers
@@ -124,3 +133,6 @@ IM2_PAGE:        equ $27             ; IM2 vector at $27FF/$2800
 LOOKUP_HASH:     equ $F800           ; 128 x 6: C64 addr, seg, Z80 addr (build.py fills it)
 LOOKUP_SLOTS:    equ 128
 TL_BASE:         equ $1800           ; base record (frame start state) for each timeline buffer
+SPC_KEY:         equ KVARS+$AA       ; 6: last SID freq per voice (sid_period_c)
+SPC_VAL:         equ KVARS+$5A       ; 6: its PSG period (unused SID shadow bytes)
+KB_SKIP:         equ 12              ; MSX2+: kerb lines a heavy band ISR skips (its run time in lines)

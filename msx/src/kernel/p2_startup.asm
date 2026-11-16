@@ -61,6 +61,13 @@ ki_keys:
 	ldir
 	; force a full first render
 	call k_all_dirty
+	ld a,SEG_RENDER
+	out (PORT_P1),a
+	ld hl,LU_CACHE
+	ld de,LU_CACHE+1
+	ld bc,9
+	ld (hl),0
+	ldir
 	call psg_init
 	call v_init
 	; both timeline buffers start from the current (reset) VIC state

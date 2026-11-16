@@ -37,7 +37,13 @@ proc sample {} {
 after time ${SAMPLE_FROM:-0} sample
 after time $SECS { dumpstate; screenshot $OUT.png; close \$::samp; exit }
 TCL
-"${OPENMSX:-openmsx}" -machine Panasonic_FS-A1GT -ext gfx9000 \
+# machine follows the build: MSX2+ (FS-A1WSX + 1 MB mapper) or turbo R
+if grep -q 'MSX2PLUS: equ 1' "$HERE/build/config.inc"; then
+  MACH=${MACHINE:--machine Panasonic_FS-A1WSX -ext ram1mb}
+else
+  MACH=${MACHINE:--machine Panasonic_FS-A1GT}
+fi
+"${OPENMSX:-openmsx}" $MACH -ext gfx9000 \
   -cart "$HERE/build/buggyboy.rom" -romtype ASCII16 -script "$OUT.tcl" > "$OUT.log" 2>&1
 cat "$OUT.txt"
 python3 "$HERE/tools/symmap.py" "$OUT.samples" | head -${TOP:-25}

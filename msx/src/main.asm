@@ -1,4 +1,4 @@
-; Buggy Boy for MSX turbo R + V9990: top-level assembly file.
+; Buggy Boy for MSX2+ + V9990: top-level assembly file.
 ; Output is a sequence of regions; tools/build.py slices them into
 ; memory images using the region_* labels.
 	include "build/config.inc"

@@ -29,6 +29,7 @@ region_render_start:
 	include "src/render/commands.asm"
 	include "src/render/sprites.asm"
 	include "src/render/tables.asm"
+	include "src/kernel/p2_audio.asm"      ; sound runs with SEG_RENDER in page 1
 
 region_render_end:
 	defs NT-region_render_end,0

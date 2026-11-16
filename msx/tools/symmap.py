@@ -33,6 +33,7 @@ def load():
         [('k', os.path.join(ROOT, 'src', 'kernel_p0.asm'))]
         + [('k', f) for f in sorted(glob.glob(os.path.join(ROOT, 'src', 'kernel', 'p[02]_*.asm')))]
         + [('r', os.path.join(ROOT, 'src', 'render.asm'))]
+        + [('r', f) for f in sorted(glob.glob(os.path.join(ROOT, 'src', 'render', '*.asm')))]
         + [('l', os.path.join(ROOT, 'src', 'loader.asm'))]
     )
     for key, path in sources:

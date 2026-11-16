@@ -60,39 +60,6 @@ tl_rewind:
 	ld (tl_ptr),hl
 	ld a,(ltl_count)
 	ld (tl_left),a
-	; debug: remember this frame's events
-	push af
-	ld (dbg_ev),a
-	ld a,(LTL+8+$11)
-	ld (dbg_ev+1),a
-	pop af
-	or a
-	ret z
-	cp 14
-	jr c,tlb_d1
-	ld a,14
-tlb_d1:
-	ld b,a
-	ld hl,(tl_ptr)
-	ld de,dbg_ev+2
-tlb_d2:
-	ld a,(hl)
-	ld (de),a
-	inc de
-	push hl
-	push bc
-	ld bc,8+$11
-	add hl,bc
-	ld a,(hl)
-	ld (de),a
-	inc de
-	pop bc
-	pop hl
-	push de
-	ld de,TL_REC
-	add hl,de
-	pop de
-	djnz tlb_d2
 	ret
 
 ; record for raster line HL: advance through events with line <= HL
@@ -209,6 +176,45 @@ rs_nbm:
 rs_den:
 	ld a,b
 	ld (row_mode),a
+	; text rows below a handler's D021 change: background pixels use that colour's
+	; slot instead of slot 0 (the live top-of-frame colour)
+	ld a,(kb_n0)                ; race (kerb chain set up): its D021 bands are not row
+	or a                        ; backgrounds, and new slots would fold black to grey
+	jr nz,rs_b00
+	ld a,(row_mode)
+	and 6                       ; text rows only (their cells use SH_BGS); a slot
+	jr nz,rs_b00                ; for bitmap rows would just fold a real colour away
+	ld a,(top_col)
+	xor (ix+$21)
+	and $0F
+	jr z,rs_b00                 ; the live slot 0 already has it
+	ld a,(ix+$21)
+	call fix_slot
+	jr rs_bg0
+rs_b00:
+	xor a
+rs_bg0:
+	ld (SH_BGS),a
+	ld b,a
+	ld a,$FF
+	ld (cc_key),a               ; cell_cols may hold the previous row's background
+	ld a,(cur_row)
+	ld l,a
+	ld h,0
+	add hl,hl
+	add hl,hl
+	ld de,row_sigs+3
+	add hl,de
+	ld a,(hl)
+	cp b
+	jr z,rs_bgs
+	ld (hl),b
+	ld hl,row_full              ; row_full is RV+$10: no page crossing
+	ld a,(cur_row)
+	add a,l
+	ld l,a
+	ld (hl),1                   ; background changed: redraw the row
+rs_bgs:
 	ld a,(ix+$16)
 	and 8
 	ld (row_csel),a

@@ -77,55 +77,6 @@ k_map_c2:
 	out (PORT_P2),a
 	ret
 
-; Native C64 IRQ handlers, called by int_hline in place of the translated
-; ones (C64 page 3 mapped, in_irq set).  Z: handled; NZ: run the C64 handler.
-irq_native:
-	ld a,($FFFE)
-	cp $E3
-	ret nz
-	ld a,(vec_ffff)
-	cp $10
-	ret nz
-	; $10E3: kerb colour band.  X = $49 indexes the band line table L14A6
-	; and the colour table L14B3; the last band (X = 12) does the frame
-	; work: left to the translated handler.
-	ld a,($0049)
-	ld e,a
-	ld d,0
-	ld hl,$14A6
-	add hl,de
-	ld a,($004A)
-	cp (hl)
-	jr nz,irn_done              ; stale IRQ: the C64 handler just returns
-	ld a,e
-	cp 12
-	jr z,irn_c64
-	ld a,$3B
-	call iowf_D011
-	ld a,$10
-	call iowf_D016
-	ld hl,$14B3
-	add hl,de
-	ld a,(hl)
-	call iowf_D021
-	inc e
-	ld a,e
-	cp 12
-	jp c,kb_start               ; bands e..11 by the native chain (returns Z)
-	ld ($0049),a
-	ld hl,$14A6
-	add hl,de
-	ld a,(hl)
-	call iowf_D012
-	ld ($004A),a
-	ld a,1
-	call iowf_D019
-irn_done:
-	xor a
-	ret
-irn_c64:
-	or 1
-	ret
 
 ; show palette bank A (0/1): R#13 PLTO5-4, R#15 backdrop follows (C clobbered)
 pal_show:
@@ -145,8 +96,65 @@ pal_show:
 	out (V_REG),a
 	ret
 
-; line IRQ while the kerb band chain runs (kernel_p2 kb_fast)
+; line IRQ while the kerb band chain runs.  Fast path (MSX2+): the bands
+; alternate two colours and band 1's ISR staged band 2's, so from band 2 on
+; each band is a plain palette bank flip, done here with AF/HL/BC only.
+; First band, a failed kb_chk or a vblank flag with the line flag: heavy path.
 k_int_kb:
+	if MSX2PLUS
+	push hl
+	ld a,(pal_bank)             ; fast only when the bank not on screen already
+	rrca                        ; holds this band's colour (staged): else heavy
+	ld hl,bank_live
+	jr c,kik_ob
+	ld hl,bank_live+4
+kik_ob:
+	ld a,(hl)
+	ld hl,(kb_ptr)
+	inc hl
+	cp (hl)
+	jr nz,kik_heavy             ; HL = kb_ptr+1 (colour) from here on
+	in a,(V_INT)
+	rrca
+	jr c,kik_heavy              ; vblank pending too (command end is not ours: ignore)
+	ld a,2
+	out (V_INT),a
+	inc hl
+	ld (kb_ptr),hl              ; -> next entry (line)
+	ld a,13
+	out (V_SEL),a
+	ld a,(pal_bank)
+	xor 1
+	ld (pal_bank),a
+	add a,a
+	add a,a
+	out (V_REG),a               ; R#13 = bank * 4
+	ld a,15                     ; R#15 too, as pal_show (openMSX shows R#13 at the next sync)
+	out (V_SEL),a
+	ld a,(pal_bank)
+	rrca
+	rrca
+	rrca
+	rrca
+	or PAL_BORDER
+	out (V_REG),a
+	ld a,10
+	out (V_SEL),a
+	ld a,(hl)                   ; next band's line (or band 12's)
+	sub RASTER_OFS
+	out (V_REG),a
+	xor a
+	out (V_REG),a
+	ld hl,kb_n
+	dec (hl)
+	pop hl
+	pop af
+	ei
+	reti
+kik_heavy:
+	pop hl
+	endif
+k_int_kbh:
 	push bc
 	push de
 	push hl
@@ -166,6 +174,8 @@ k_int_kb:
 	pop af
 	ei
 	reti
+
+
 region_im2_end:
 
 ; ============================================================================

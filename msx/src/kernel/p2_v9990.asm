@@ -56,7 +56,6 @@ vi_clr2:
 	ld a,d
 	or e
 	jr nz,vi_clr
-	; interrupt line 256 until the game sets one
 	ld hl,256
 	ld a,10
 	out (V_SEL),a
@@ -65,6 +64,8 @@ vi_clr2:
 	ld a,h
 	out (V_REG),a
 	call sli_zero
+	ld hl,0
+	ld (sli_last),hl
 	ld a,7
 	out (V_INT),a
 	ret
@@ -72,7 +73,12 @@ v_init_regs:
 	db 6, $95                   ; B3: bitmap, XTAL1, 512 px, 4 bpp
 	db 7, $08                   ; PAL, non interlaced
 	db 8, $C2                   ; display on, cursor off
+	if MSX2PLUS
+	db 9, $03                   ; vblank + line (kerb band chain only)
+	else
 	db 9, $03                   ; line + vblank interrupts
+	endif
+	db 11, $00
 	db 46, $FF, 47, $FF          ; command write mask: all bits (render never changes it)
 	db 13, $00                  ; palette mode, offset 0
 	db 15, PAL_BORDER           ; backdrop

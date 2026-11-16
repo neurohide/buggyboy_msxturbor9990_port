@@ -8,6 +8,9 @@ int_dispatch:
 	push af
 	and 3
 	cp 3
+	if MSX2PLUS
+	jr id_normal
+	else
 	jr nz,id_normal
 	ld a,(sli_bord)
 	or a
@@ -20,6 +23,7 @@ int_dispatch:
 	bit 1,a
 	ret z                       ; already served during the render
 	jp int_hline
+	endif
 id_normal:
 	pop af
 	push af
@@ -31,12 +35,18 @@ id_normal:
 	jp int_vblank
 
 int_hline:
+	if MSX2PLUS
+	ld a,2
+	out (V_INT),a
+	ret                         ; only the kerb chain arms lines (k_int_kb)
+	else
 	ld a,2
 	out (V_INT),a
 	; the beam is at the armed line right now: restart the raster clock there
 	; (anchoring only at vblank lags whenever the vblank was served late)
 	xor a
 	out (TIMER_LO),a
+	endif
 	ld hl,267                   ; border slot: V9990 line 222
 	ld a,(sli_bord)
 	or a
@@ -49,6 +59,9 @@ int_hline:
 	ld l,a
 ih_anchor:
 	ld (raster_base),hl
+	if MSX2PLUS
+	call arm_next               ; keep the raster clock running
+	endif
 	ld hl,(irq_count)
 	inc hl
 	ld (irq_count),hl
@@ -109,6 +122,17 @@ ih_late:
 	ld (irq_line+1),a
 	jr ih_again
 
+if MSX2PLUS
+;  Arm the V9990 line IRQ at the C64 compare line (soft_target).  The
+; MSX2+ has no free-running timer and line IRQs taken late (the C64
+; handlers run with interrupts off) would break a chain of clock ticks, so
+; only the compare line is armed; raster reads step the clock (get_raster).
+; V9990 line IRQs fire for C64 lines 45..RASTER_LAST (V9990 0..256): a
+; compare line outside is served at RASTER_LAST.  Interrupts off.  Uses A, DE, HL.
+arm_next:
+	ret                         ; no line IRQs: vbl_catchup runs the chain
+endif
+
 int_vblank:
 	ld a,1
 	out (V_INT),a
@@ -154,15 +178,67 @@ ivb_flip:
 	xor 1
 	ld (page_back),a
 ivb_noflip:
+	if MSX2PLUS=0
 	xor a
 	out (TIMER_LO),a            ; raster clock restarts at C64 line 257
+	endif
 	ld hl,257
 	ld (raster_base),hl
+	if MSX2PLUS
+	call arm_next
+	endif
 	ld hl,frame_count
 	inc (hl)
+	if MSX2PLUS=0
 	call vbl_catchup
+	endif
 	call read_input
+	ld a,SEG_RENDER             ; sound code lives in the render segment
+	out (PORT_P1),a
 	call sound_frame
+	ld a,(cur_p1)
+	out (PORT_P1),a
+	if MSX2PLUS
+	ld a,$FF
+	ld (VIC_REGS+$21),a        ; shadow differs: iowf_D021 must write the live palette
+	ld a,(top_col)              ; the kerb bands and later handlers left their
+	call iowf_D021              ; last colour in the live palette: the next frame
+	; kerb bands: replay the last list every frame (on even frames
+	; vbl_catchup's kb_start runs ~10-15 ms later, often past band 1), then
+	; stage band 1's colour
+	ld a,(kb_n0)
+	or a
+	jr z,ivb_kbs
+	ld (kb_n),a
+	ld hl,kb_list
+	ld (kb_ptr),hl
+	or 1
+	call kb_due
+ivb_kbs:
+	ld a,(kb_n)
+	or a
+	jr z,ivb_kbx
+	ld hl,(kb_ptr)
+	inc hl
+	ld a,(hl)
+	call kb_prep
+ivb_kbx:
+	; the C64 handlers run after the frame's palette is set up: they take
+	; ~10 ms, and their D021 writes only reach the timeline (iowr_bg)
+	call vbl_catchup
+	endif
+	if MSX2PLUS
+	; odd vblanks run no C64 IRQs: keep the last complete timeline for the
+	; renderer (an empty one would draw every row in the top-of-frame mode)
+	ld a,(frame_count)
+	and CHAIN_MASK
+	jr z,ivb_even
+	ld a,(rendering)
+	or a
+	ret nz
+	jp ivb_decide
+ivb_even:
+	endif
 	ld a,(rendering)
 	or a
 	jr z,ivb_swap
@@ -187,6 +263,8 @@ ivb_swap:
 	call tl_clear_irq
 	call tl_base_snapshot
 	call vbl_border
+ivb_decide:
+                       ; starts with the colour of the line-0 handler
 	; The game's main loop only gets the CPU the renderer leaves free (it fell
 	; to ~2 iterations/s while the renderer ran at every vblank).  Render only
 	; once the main code has reached a frame sync (polled the raster) since the
@@ -238,9 +316,13 @@ ivb_go:
 ; of at the next vblank (the wait for that vblank was idle time).  Keeps every
 ; register; the vblank ISR sees `rendering` set, as for its own renders.
 sli_zero:
+	if MSX2PLUS
+	ret
+	else
 	ld hl,0
 	ld (sli_last),hl
 	ret
+	endif
 
 ; main code, end of a race-loop pass: run the render it asked for now instead
 ; of at the next vblank (the wait for that vblank was idle time).  Same
@@ -268,11 +350,56 @@ k_render_now:
 ; missed (the line was programmed a moment too late): run the C64 handlers
 ; now, at the bottom of the screen, so the chain keeps its 50 Hz rhythm.
 vbl_catchup:
+	if MSX2PLUS
+	; the Z80 cannot run the C64 IRQ chain and render in one frame: game
+	; IRQs at 25 Hz, the other vblank is the renderer's
+	ld a,(frame_count)
+	and CHAIN_MASK
+	ret nz
+	endif
 	ld b,16                     ; at most this many handlers
+	if MSX2PLUS
+	; MSX2+: no line IRQs (taken late they broke the chain); the whole
+	; frame's C64 IRQ chain runs here, in raster order from the vblank line.
+	; The timeline keeps each handler's line for the renderer.
+	ld b,32
+	ld hl,$FFFF
+	ld (vc_last),hl
+	xor a
+	ld (irq_late),a
+	endif
 vc_loop:
 	ld a,(vic_imr)
 	and 1
 	ret z
+	if MSX2PLUS
+	ld a,(VIC_REGS+$11)
+	rlca
+	and 1
+	ld h,a
+	ld a,(VIC_REGS+$12)
+	ld l,a
+	ld de,-257
+	add hl,de
+	jr c,vck_k                  ; key = (line - 257) mod 312
+	ld de,312
+	add hl,de
+vck_k:
+	ld de,(vc_last)
+	ld a,d
+	and e
+	inc a
+	jr z,vck_run                ; first handler of the frame
+	push hl
+	or a
+	sbc hl,de
+	pop hl
+	ret c                       ; compare line wrapped: next frame
+	ret z
+vck_run:
+	ld (vc_last),hl
+	jr vc_run
+	endif
 	ld a,(irq_late)
 	or a
 	jr z,vc_vis
@@ -309,6 +436,12 @@ vc_run:
 	rlca
 	and 1
 	ld (irq_line+1),a
+	if MSX2PLUS
+	ld a,1
+	ld (in_irq),a
+	call irq_native             ; kerb bands natively (Z: done)
+	jr z,vc_nat
+	endif
 	ld bc,0
 	ld de,0
 	ld a,($FFFE)
@@ -318,16 +451,35 @@ vc_run:
 	ld a,1
 	ld (in_irq),a
 	call k_callc64
+vc_nat:
 	xor a
 	ld (in_irq),a
+	if MSX2PLUS
+	ld hl,(irq_line)            ; a handler above the first visible line (51)
+	ld a,h                      ; sets the colour of the top of the frame
+	or a
+	jr nz,vcn_nt
+	ld a,l
+	cp 52
+	jr nc,vcn_nt
+	ld a,(VIC_REGS+$21)
+	ld (top_col),a
+vcn_nt:
+	endif
 	call tl_snapshot
 	pop bc
-	djnz vc_loop
+	dec b
+	jp nz,vc_loop
 	ret
 
 ; the border-slot IRQ (C64 raster 0, top of the frame) was armed too late:
 ; run it now that the new frame's timeline is open
 vbl_border:
+	if MSX2PLUS
+	ld a,(frame_count)
+	and CHAIN_MASK
+	ret nz
+	endif
 	ld a,(irq_late)
 	or a
 	ret z
@@ -410,8 +562,18 @@ tl_fill:
 	add hl,de
 	ex de,hl                    ; DE -> record+8
 	ld hl,VIC_REGS
-	ld bc,$30
-	ldir
+	ld a,6                      ; 48 bytes: 8 x ldi per pass (ldir costs 21 T/byte, ldi 16)
+tlf_l:
+	ldi
+	ldi
+	ldi
+	ldi
+	ldi
+	ldi
+	ldi
+	ldi
+	dec a
+	jr nz,tlf_l
 	; sprite pointers: screen base + $3F8 inside the VIC bank
 	ld a,(VIC_REGS+$18)
 	and $F0

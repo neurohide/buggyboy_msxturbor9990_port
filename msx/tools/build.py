@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the Buggy Boy MSX turbo R ROM: translate, assemble, slice, pack."""
+"""Build the Buggy Boy MSX2+ / V9990 ROM: translate, assemble, slice, pack."""
 import json
 import os
 import re
@@ -72,10 +72,10 @@ def build_lookup(mem, lab, nseg):
 
 def main():
     os.makedirs(BUILD, exist_ok=True)
-    msx2plus = os.environ.get('MSX2PLUS', '0').lower() in ('1', 'true', 'yes', 'on')
+    msx2plus = os.environ.get('MSX2PLUS', '1').lower() in ('1', 'true', 'yes', 'on')
     with open(os.path.join(BUILD, 'config.inc'), 'w') as f:
         f.write('MSX2PLUS: equ %d\n' % (1 if msx2plus else 0))
-    print('MSX2+ 25fps render mode: %s' % ('on' if msx2plus else 'off'))
+    print('MSX2+ with V9990 raster clock: %s' % ('on' if msx2plus else 'off'))
     subprocess.check_call([sys.executable, os.path.join(HERE, 'translate.py'), BUILD])
     info = json.load(open(os.path.join(BUILD, 'translate.json')))
     nseg = len(info['segments'])
