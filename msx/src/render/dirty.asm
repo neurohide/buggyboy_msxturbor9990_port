@@ -69,7 +69,9 @@ rd_live:
 	inc hl
 	ld h,(hl)
 	ld l,a
-	call chunk_of
+	add hl,hl
+	add hl,hl
+	ld a,h
 	and 15
 	ld e,a
 	ld d,0
@@ -139,7 +141,9 @@ rdm_l:
 rd_bmprep:
 	; a bitmap row is 320 bytes = 5 aligned chunks of 8 cells each
 	ld hl,(row_bmoff)
-	call chunk_of
+	add hl,hl
+	add hl,hl
+	ld a,h
 	ld l,a
 	ld h,VDW/256
 	ld de,rd_grp
@@ -501,7 +505,7 @@ rdc_loop_t:                     ; group start (C = 0, 8 .. 32), B = any dirty
 	jr nz,rdt_all
 	ld a,(any_chd)
 	or a
-	jr z,rdt_gend               ; no character changed: all 8 clean
+	jp z,rdt_gend               ; no character changed: all 8 clean
 	; screen and colour unchanged: only cells showing a changed character
 	ld hl,(row_scr)
 	ld e,c
@@ -521,7 +525,7 @@ rdt_cl:
 	ld a,c
 	and 7
 	jr nz,rdt_cl
-	jr rdt_next
+	jp rdt_next
 rdt_all:                        ; screen or colour changed: all 8 are candidates
 	push bc
 	ld b,0
@@ -543,6 +547,9 @@ rdt_all:                        ; screen or colour changed: all 8 are candidates
 	ld hl,(row_scr)
 	add hl,bc                   ; HL = screen
 	pop bc
+	ld a,(any_chd)
+	or a
+	jr z,rdt_plain              ; no glyph bytes changed: compare only character and colour
 rdt_al:
 	ld a,(hl)
 	cp (iy+0)
@@ -584,6 +591,35 @@ rdt_an:
 	ld a,c
 	and 7
 	jr nz,rdt_al
+	jr rdt_next
+rdt_plain:
+	ld a,(hl)
+	cp (iy+0)
+	jr nz,rdt_pd
+	ld a,(de)
+	and $0F
+	cp (iy+1)
+	jr z,rdt_pn
+rdt_pd:
+	ld b,1
+	push hl
+	ld a,c
+	add a,celldirty & 255
+	ld l,a
+	ld h,celldirty/256
+	ld (hl),1
+	pop hl
+rdt_pn:
+	inc hl
+	inc de
+	push de
+	ld de,10
+	add iy,de
+	pop de
+	inc c
+	ld a,c
+	and 7
+	jr nz,rdt_plain
 	jr rdt_next
 rdt_gend:
 	ld a,c
@@ -914,7 +950,9 @@ grp_bits:
 	ld b,bittab/256
 	ld a,(bc)
 	ld c,a                      ; C = mask of the first group's 8-byte block
-	call chunk_of
+	add hl,hl
+	add hl,hl
+	ld a,h
 	ld l,a
 	ld h,VDW/256
 	pop af
@@ -1004,10 +1042,14 @@ sc_done:
 chunks_any:
 	push hl
 	add hl,de
-	call chunk_of
+	add hl,hl
+	add hl,hl
+	ld a,h
 	ld e,a                      ; last chunk
 	pop hl
-	call chunk_of               ; first chunk
+	add hl,hl                   ; first chunk
+	add hl,hl
+	ld a,h
 	ld l,a
 	ld h,VDW/256
 	ld a,e
@@ -1062,14 +1104,5 @@ shadow_store:
 	ldi
 	pop bc
 	ld (dr_shad),de             ; LDI advanced source and shadow by 8 bytes
-	ret
-
-; HL = bank offset -> A = 64-byte chunk index
-chunk_of:
-	push hl
-	add hl,hl
-	add hl,hl                   ; H = (offset & $3FC0) >> 6
-	ld a,h
-	pop hl
 	ret
 

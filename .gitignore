@@ -6,4 +6,5 @@ msx/build/*
 !msx/build/buggyboy.rom
 intro/data.inc
 .agents
+.claude/
 claude-history

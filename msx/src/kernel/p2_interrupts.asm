@@ -315,12 +315,9 @@ ivb_decide:
 	or a
 	ret nz                      ; give setup all CPU until the first road draw
 	endif
-                       ; starts with the colour of the line-0 handler
-	; The game's main loop only gets the CPU the renderer leaves free (it fell
-	; to ~2 iterations/s while the renderer ran at every vblank).  Render only
-	; once the main code has reached a frame sync (polled the raster) since the
-	; last render, or after 4 vblanks without one, or while a new screen is
-	; being built (calm_flips = $FF).
+	; Render at explicit sync points. The race hook refreshes mt_head each
+	; pass: wait for the next completed pass instead of redrawing partial state.
+	; When the watchdog expires, restore the menu's one-vblank fallback.
 	ld a,(mt_sync)
 	or a
 	jr nz,ivb_go
@@ -332,8 +329,8 @@ ivb_decide:
 	ld a,(hl)
 	or a
 	jr z,ivb_skip
-	dec (hl)                    ; race loop: wait for its pass (fallback 12)
-	ld b,12
+	dec (hl)                    ; race loop owns rendering until the watchdog expires
+	ret                         ; avoid rendering partially updated road/game state
 ivb_skip:
 	ld hl,skip_n
 	ld a,(hl)
@@ -636,7 +633,45 @@ tl_fill:
 	add hl,de
 	ex de,hl                    ; DE -> record+8
 	ld hl,VIC_REGS
-	ld a,6                      ; 48 bytes: 8 x ldi per pass (ldir costs 21 T/byte, ldi 16)
+	if IRQ_SNAPSHOT
+	; Keep the record's offsets, but capture only fields read by rows/sprites.
+	; Both pointers remain in their initial pages throughout these skips.
+	ld bc,$12                   ; sprite XY, X high bits, display mode ($00..$11)
+	ldir
+	inc l                       ; skip raster compare / light pen ($12..$14)
+	inc l
+	inc l
+	inc e
+	inc e
+	inc e
+	ldi                         ; enable, X scroll, Y expansion, memory ($15..$18)
+	ldi
+	ldi
+	ldi
+	inc l                       ; skip IRQ status/mask, sprite priority ($19..$1B)
+	inc l
+	inc l
+	inc e
+	inc e
+	inc e
+	ldi                         ; multicolour, X expansion ($1C..$1D)
+	ldi
+	inc l                       ; skip collision latches and border ($1E..$20)
+	inc l
+	inc l
+	inc e
+	inc e
+	inc e
+	ldi                         ; background colours ($21..$23)
+	ldi
+	ldi
+	inc l                       ; $24 unused
+	inc e
+	ld bc,10                    ; sprite shared colours and colours ($25..$2E)
+	ldir
+	inc e                       ; $2F unused; sprite pointers start at record+$38
+	else
+	ld a,6
 tlf_l:
 	ldi
 	ldi
@@ -648,6 +683,7 @@ tlf_l:
 	ldi
 	dec a
 	jr nz,tlf_l
+	endif
 	; sprite pointers: screen base + $3F8 inside the VIC bank
 	ld a,(VIC_REGS+$18)
 	and $F0

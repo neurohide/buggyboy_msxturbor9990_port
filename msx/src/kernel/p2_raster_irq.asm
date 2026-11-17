@@ -317,16 +317,6 @@ sli_set2:
 	ld (soft_target),hl
 	pop hl
 sli_soft_done:
-	endif
-	if MSX2PLUS
-	call k_get_iff
-	push af
-	di
-	call arm_next
-	pop af
-	or a
-	jr z,sli_di
-	ei
 	jr sli_di
 	else
 	; the V9990 line register only changes when the armed line does
@@ -339,7 +329,6 @@ sli_soft_done:
 	jr z,sli_di
 	ld (sli_last),hl
 	dec hl
-	endif
 	call k_get_iff
 	push af
 	di
@@ -353,6 +342,7 @@ sli_soft_done:
 	or a
 	jr z,sli_di
 	ei
+	endif
 sli_di:
 	; has the beam already passed the compare line (by less than 24 lines)?
 	call get_raster              ; HL = current line

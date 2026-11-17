@@ -75,6 +75,9 @@ def main():
     msx2plus = os.environ.get('MSX2PLUS', '1').lower() in ('1', 'true', 'yes', 'on')
     with open(os.path.join(BUILD, 'config.inc'), 'w') as f:
         f.write('MSX2PLUS: equ %d\n' % (1 if msx2plus else 0))
+        f.write('IRQ_SNAPSHOT: equ %d\n' % (os.environ.get('IRQ_SNAPSHOT', '1') == '1'))
+        f.write('IRQ_NATIVE_MODE: equ %d\n' % ({'0': 0, '1': 1, 'ab': 2}[
+            os.environ.get('IRQ_NATIVE', '1')]))
     print('MSX2+ with V9990 raster clock: %s' % ('on' if msx2plus else 'off'))
     subprocess.check_call([sys.executable, os.path.join(HERE, 'translate.py'), BUILD])
     info = json.load(open(os.path.join(BUILD, 'translate.json')))
@@ -90,6 +93,18 @@ def main():
         if r.returncode:
             sys.exit('assembly failed')
     lab = labels(lblf)
+    if lab['IRQ_SNAPSHOT'] and (lab['TL_REC'] != 64 or lab['VIC_REGS'] & 255 or
+                               any(lab[k] & 255 for k in ('TL_BASE', 'TIMELINE', 'TIMELINE1'))):
+        sys.exit('Sparse IRQ snapshots require page-aligned tables and 64-byte records')
+    if lab['SCACHE'] & 0x7FF:
+        sys.exit('SCACHE must be $800 aligned for the native sprite-cache address calculation')
+    if any(lab[k] & 255 for k in ('VDIRTY', 'VDW')) or any(
+            (lab[k] & 255) > 240 for k in ('cdirty', 'cdw')):
+        sys.exit('Dirty snapshot tables must stay within their source/destination pages')
+    hires = [lab[k] for k in ('CM_HA', 'CM_HB', 'CM_HC', 'CM_HD')]
+    if hires[0] & 255 or hires != list(range(hires[0], hires[0] + 1024, 256)) or not (
+            lab['SPANP_HI'] + 25 <= hires[0] and hires[-1] + 256 <= 0x10000):
+        sys.exit('Hires CMMC tables need four consecutive free pages in SEG_SHADOW')
     data = open(binf, 'rb').read()
     # regions in source order with their lengths
     order = [('im2', 'region_im2_start', 'region_im2_end'),
@@ -113,8 +128,8 @@ def main():
             if start < lo or end > hi:
                 sys.exit('region %s out of bounds' % name)
         elif name == 'render':
-            # runtime tables above the code (SCACHE, CMMC tables) must not overlap it
-            low = min(lab[k] for k in ('SCACHE', 'CM_TA', 'CM_PT') if k in lab)
+            # Include the dirty-cell buffer and timeline, before the lookup tables.
+            low = min(lab[k] for k in ('celldirty', 'LTL', 'SCACHE', 'CM_TA', 'CM_PT'))
             print('render %04X-%04X (%d bytes before runtime tables)' % (start, lab['region_render_end'] - 1, low - lab['region_render_end']))
             if lab['region_render_end'] > low:
                 sys.exit('render code overlaps its runtime tables')

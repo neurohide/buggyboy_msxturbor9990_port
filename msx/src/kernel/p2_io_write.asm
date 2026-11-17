@@ -318,7 +318,10 @@ k_setlive:
 	ld l,a
 	ld h,palette_shadow/256
 	ld (hl),b
-	call k_get_iff
+	ld a,i
+	jp pe,ksl_iff
+	ld a,i
+ksl_iff:
 	push af
 	di
 	ld a,(pal_bank)
@@ -364,15 +367,15 @@ ksl_diff:
 	add a,c
 	out (V_REG),a
 	push hl
-	push de
 	ld a,(hl)
 	ld l,a
 	add a,a
 	add a,l
+	add a,c64_rgb & 255
 	ld l,a
-	ld h,0
-	ld de,c64_rgb
-	add hl,de
+	ld a,c64_rgb/256
+	adc a,0                     ; table may cross a page after kernel relocation
+	ld h,a
 	ld a,(hl)
 	out (V_PAL),a
 	inc hl
@@ -381,15 +384,13 @@ ksl_diff:
 	inc hl
 	ld a,(hl)
 	out (V_PAL),a
-	pop de
 	pop hl
 	jr ksl_skip
 ksl_done:
 	ld a,(pal_bank)
 	call pal_show
 	pop af
-	or a
-	jr z,ksl_di
+	jp po,ksl_di
 	ei
 ksl_di:
 	pop de

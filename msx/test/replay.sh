@@ -8,6 +8,7 @@
 # PROFILE=1 records per-frame work in <outprefix>_frames.csv, aggregate counts
 # in <outprefix>_work.txt, and PC samples in <outprefix>_pc.samples.
 # PROFILE_FROM/PROFILE_TO select the emulated-second window (default 60..100).
+# PROFILE_CELLS=1 and PROFILE_SPRITES=1 add pattern traces for cache analysis.
 NAME=${1:-ref}
 OUT=${2:-${TMPDIR:-/tmp}/bb_replay}
 shift 2 2>/dev/null
@@ -74,6 +75,7 @@ foreach name {commands lmmm lmmv lmmc cmmc copy_pixels sprite_lookups sprite_bui
   set ::prof_prev_\$name 0
 }
 proc prof_frame {} {
+  if {!\$::prof_on} { return }
   set now [machine_info time]
   set cells [expr {[debug read memory $prof_dbg_cells] + 256 * [debug read memory [expr {$prof_dbg_cells + 1}]]}]
   set full [debug read memory $prof_dbg_full]
@@ -95,7 +97,14 @@ proc prof_frame {} {
 proc prof_sample {} {
   if {!\$::prof_on} { return }
   set pc [reg pc]
-  puts \$::prof_pc "[format %X [debug read memory 0x2F60]] [format %X \$pc]"
+  set sp [reg sp]
+  set stack {}
+  for {set i 0} {\$i < 10} {incr i} {
+    set a [expr {(\$sp + 2 * \$i) & 0xFFFF}]
+    set w [expr {[debug read memory \$a] + 256 * [debug read memory [expr {(\$a + 1) & 0xFFFF}]]}]
+    lappend stack [format %X \$w]
+  }
+  puts \$::prof_pc "[format %X [debug read memory 0x2F60]] [format %X \$pc] [join \$stack { }]"
   incr ::prof_samples
   if {\$pc >= $prof_v_wait && \$pc < $prof_v_send_cmd && [debug read memory 0x2F60] == $prof_SEG_RENDER} {
     incr ::prof_wait_samples
@@ -153,6 +162,7 @@ TCL
     cat >> "$OUT.tcl" <<TCL
 set ::prof_cell_log [open "${OUT}_cells.txt" w]
 proc prof_cell {} {
+  if {![info exists ::prof_cell_log]} { return }
   set key {}
   set source [reg hl]
   for {set i 0} {\$i < 8} {incr i} {
@@ -179,11 +189,16 @@ TCL
 set ::prof_sprite_miss 0
 set ::prof_sprite_log [open "${OUT}_sprites.txt" w]
 proc prof_sprite {} {
+  if {![info exists ::prof_sprite_log]} { return }
+  if {\$::prof_sprite_miss == 1} {
+    set ::prof_sprite_miss 2   ;# sp_render calls spc_pos before returning to sp_cache
+    return
+  }
   set key {}
   for {set i 10} {\$i < 15} {incr i} {
     append key [format %02X [debug read memory [expr {$prof_spr_tmp + \$i}]]]
   }
-  puts \$::prof_sprite_log "\$::prof_sprite_miss [debug read memory [expr {$prof_spr_tmp + 15}]] \$key"
+  puts \$::prof_sprite_log "[expr {\$::prof_sprite_miss == 2}] [debug read memory [expr {$prof_spr_tmp + 15}]] \$key"
   set ::prof_sprite_miss 0
 }
 after time ${PROFILE_FROM:-60} {

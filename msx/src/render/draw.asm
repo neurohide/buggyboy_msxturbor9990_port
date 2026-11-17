@@ -6,6 +6,8 @@ renderer_draw_dirty_cells:
 	ld a,(row_mode)
 	bit 2,a
 	jp nz,row_blank
+	xor a
+	ld (csf_need),a
 	ld hl,celldirty
 rrn_scan:                       ; next dirty cell (sentinel $80 after cell 39)
 	ld a,(hl)
@@ -16,7 +18,7 @@ rrn_scan:                       ; next dirty cell (sentinel $80 after cell 39)
 	ld a,l
 	sub celldirty & 255
 	cp 40
-	ret nc
+	jp nc,csel_fix
 	ld (run_start),a
 	ld b,0
 rrn_len:                        ; run of 1s (0 or the sentinel ends it)
@@ -165,6 +167,22 @@ dr_cell:
 	pop hl
 	call cell_plain_uniform
 	jr z,dr_uniform
+	ld a,(cell_cols)
+	or a
+	jr nz,dr_mc
+	; Hires always has two colours: CMMC needs no colour expansion table.
+	ld a,(cell_cols+1)
+	ld b,a
+	ld a,(cell_cols+2)
+	cp b
+	jr nz,dr_pix
+	add a,a
+	add a,a
+	add a,a
+	add a,a
+	or b
+	jr dr_uniform
+dr_mc:
 	push hl
 	ld a,(cc_hit)
 	or a
@@ -204,9 +222,7 @@ dr_pix:
 	push hl
 	call dr_flush
 	pop hl
-	ld a,(cell_cols)
-	or a
-	call nz,dr_two              ; multicolour with 2 pixel values: CMMC, CF
+	call dr_two                 ; hires or two-value multicolour: CMMC, CF
 	jr c,dr_adv
 	ld a,(dr_full)
 	or a
@@ -251,12 +267,15 @@ dr_adv:
 	dec b
 	jp nz,dr_cell
 	call dr_flush
-	jp csel_fix
+	jp csel_mark
 
 ; HL = 8 source bytes of a multicolour cell.  Exactly 2 pixel values: draw it
 ; with CMMC (12 data bytes instead of LMMC's 48), CF.  Otherwise NC, HL kept.
 dr_two:
 	push hl
+	ld a,(cell_cols)
+	or a
+	jp z,dt_hires
 	ld d,CM_PT/256
 	ld c,0
 	ld e,(hl)
@@ -333,6 +352,7 @@ dt_go:                          ; A = $80 | fg << 2 | bg
 	add hl,de
 	ld a,(hl)
 	ld (cm_x),a
+dt_command:
 	call v_wait
 	ld a,i                      ; P/V = IFF2 (read twice, as k_get_iff)
 	jp pe,dt_on
@@ -393,6 +413,10 @@ dt_op:
 	ei
 dt_di:
 	pop de                      ; source
+dt_stream_begin:
+	ld a,(cell_cols)
+	or a
+	jp z,dh_out
 	ld a,(cm_x)
 	ld c,a
 	ld a,(de)
@@ -467,6 +491,104 @@ dt_di:
 	ld a,(de)
 	inc de
 	xor c
+	ld l,a
+	inc h
+	ld a,(hl)
+	or b
+	out (V_CMD),a
+	inc h
+	ld a,(hl)
+	out (V_CMD),a
+	scf
+	ret
+
+; Hires foreground/background use the same command setup as multicolour.
+dt_hires:
+	ld a,(cell_cols+1)
+	ld b,a
+	add a,a
+	add a,a
+	add a,a
+	add a,a
+	or b
+	ld (cm_bc),a
+	ld a,(cell_cols+2)
+	ld b,a
+	add a,a
+	add a,a
+	add a,a
+	add a,a
+	or b
+	ld (cm_fc),a
+	jp dt_command
+
+; Pack each pair of 12-bit hires masks into three CMMC bytes.
+; Four pairs are unrolled to keep the Z80 busy with table reads and port writes.
+dh_out:
+	ld a,(de)
+	inc de
+	ld l,a
+	ld h,CM_HA/256
+	ld a,(hl)
+	out (V_CMD),a
+	inc h
+	ld b,(hl)
+	ld a,(de)
+	inc de
+	ld l,a
+	inc h
+	ld a,(hl)
+	or b
+	out (V_CMD),a
+	inc h
+	ld a,(hl)
+	out (V_CMD),a
+	ld a,(de)
+	inc de
+	ld l,a
+	ld h,CM_HA/256
+	ld a,(hl)
+	out (V_CMD),a
+	inc h
+	ld b,(hl)
+	ld a,(de)
+	inc de
+	ld l,a
+	inc h
+	ld a,(hl)
+	or b
+	out (V_CMD),a
+	inc h
+	ld a,(hl)
+	out (V_CMD),a
+	ld a,(de)
+	inc de
+	ld l,a
+	ld h,CM_HA/256
+	ld a,(hl)
+	out (V_CMD),a
+	inc h
+	ld b,(hl)
+	ld a,(de)
+	inc de
+	ld l,a
+	inc h
+	ld a,(hl)
+	or b
+	out (V_CMD),a
+	inc h
+	ld a,(hl)
+	out (V_CMD),a
+	ld a,(de)
+	inc de
+	ld l,a
+	ld h,CM_HA/256
+	ld a,(hl)
+	out (V_CMD),a
+	inc h
+	ld b,(hl)
+	ld a,(de)
+	inc de
 	ld l,a
 	inc h
 	ld a,(hl)
@@ -563,7 +685,66 @@ cmi_b0:
 	ld (hl),a
 	inc c
 	jr nz,cmi_l
+	; Hires preserves the existing OR interpolation between each pixel pair.
+	; Pair 00/01/10/11 expands to 000/011/110/111 respectively.
+cmi_hi:
+	ld a,c
+	ld b,4
+	ld de,0
+cmi_hbit:
+	ex de,hl
+	add hl,hl
+	add hl,hl
+	add hl,hl
+	ex de,hl
+	rlca
+	rlca
+	push af
+	and 3
+	ld hl,cm_hpair
+	add a,l
+	ld l,a
+	jr nc,cmi_hp
+	inc h
+cmi_hp:
+	ld a,(hl)
+	or e
+	ld e,a
+	pop af
+	djnz cmi_hbit
+	ld l,c
+	ld h,CM_HD/256
+	ld (hl),e
+	dec h
+	ld (hl),d
+	ld a,e
+	and 15
+	rlca
+	rlca
+	rlca
+	rlca
+	dec h
+	ld (hl),a
+	ld a,e
+	rrca
+	rrca
+	rrca
+	rrca
+	and 15
+	ld b,a
+	ld a,d
+	rlca
+	rlca
+	rlca
+	rlca
+	or b
+	dec h
+	ld (hl),a
+	inc c
+	jr nz,cmi_hi
 	ret
+cm_hpair:
+	db 0,3,6,7
 cm_bit:
 	db 1,2,4,8
 
@@ -595,24 +776,32 @@ df_l:
 	ld (dr_full),a
 	ret
 
-; 38-column mode: border over the outer columns of this row
-csel_fix:
+; A dirty run can redraw an edge.  Repair the border after the last run,
+; so one pair of fills suffices even when both edges are separate runs.
+csel_mark:
 	ld a,(row_csel)
 	or a
 	ret nz
 	ld a,(row_xoff)
 	or a
-	jr nz,csf_do
+	jr nz,csf_mark
 	ld a,(run_start)
 	or a
-	jr z,csf_do
+	jr z,csf_mark
 	ld a,(run_start)
 	ld b,a
 	ld a,(run_len)
 	add a,b
 	cp 39
 	ret c
-csf_do:
+csf_mark:
+	ld a,1
+	ld (csf_need),a
+	ret
+csel_fix:
+	ld a,(csf_need)
+	or a
+	ret z
 	ld a,(cur_row)
 	call row_y_clean
 	push hl

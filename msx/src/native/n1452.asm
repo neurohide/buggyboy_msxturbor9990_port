@@ -1,50 +1,53 @@
-; native $1452-$1485: copy the 8 sprites' X, Y, pointer and colour from the
-; game's tables to the VIC, then $D01D/$D017/$D010.  6502 exit state as the
-; original: X = $FE, Y = $FF, A = ($02E5) with N/Z from it; B = D = 0.
-	push ix
-	ld ix,$148D                 ; game X table, sprite 7
-	ld hl,VIC_REGS+$0E         ; sprite 7 X register
-	ld de,VIC_REGS+$2E         ; sprite 7 colour register
-	ld bc,7                    ; B = 0, C = sprite (6502 X)
-	call k_vic_on              ; all pointer writes target the VIC bank
-N1452_l:
-	ld a,(ix+0)
-	cp (hl)                     ; $D000+2x: X
-	jr z,N1452_xsame
-	ld (hl),a
-	ld a,1
-	ld (vic_changed),a
-N1452_xsame:
-	inc hl
-	ld a,(ix+8)
-	cp (hl)                     ; $D001+2x: Y
-	jr z,N1452_ysame
-	ld (hl),a
-	ld a,1
-	ld (vic_changed),a
-N1452_ysame:
-	dec hl
-	push hl
-	ld a,(ix+16)
-	ld hl,$47F8
-	add hl,bc
-	call k_vwrmf                ; sprite pointer; VIC bank already mapped
-	pop hl
-	ex de,hl                    ; colour register in HL, X register in DE
-	ld a,(ix+24)
-	cp (hl)                     ; $D027+x: colour
+; Native $1452-$1485. Source tables are consecutive: X, Y, pointers, colours.
+; Compare linear streams and collect changes instead of marking every register.
+; Exit: X=$FF, Y=$FE, A=($02E5), N/Z from A; B=D=0. IX/IY kept.
+	call k_vic_on
+	ld hl,$1486
+	ld de,VIC_REGS
+	ld c,0                      ; any X/Y/colour register changed
+	call N1452_xy
+	ld e,1
+	call N1452_xy
+	; All eight sprite pointers occupy the same 8-byte dirty group.
+	; No $FFFF subslot special case is possible for this fixed destination.
+	ld de,$C7F8
+	ld b,8
+	push bc
+	ld c,0
+N1452_ptr:
+	ld a,(de)
+	cp (hl)
+	jr z,N1452_psame
+	ld a,(hl)
+	ld (de),a
+	ld c,$80
+N1452_psame:
+	inc l
+	inc e
+	djnz N1452_ptr
+	ld a,(VDIRTY+$1F)
+	or c
+	ld (VDIRTY+$1F),a
+	pop bc
+	ld de,VIC_REGS+$27
+	ld b,8
+N1452_col:
+	ld a,(de)
+	cp (hl)
 	jr z,N1452_csame
-	ld (hl),a
+	ld a,(hl)
+	ld (de),a
+	ld c,1
+N1452_csame:
+	inc l
+	inc e
+	djnz N1452_col
+	ld a,c
+	or a
+	jr z,N1452_regs_done
 	ld a,1
 	ld (vic_changed),a
-N1452_csame:
-	ex de,hl
-	dec ix
-	dec hl
-	dec hl
-	dec de
-	dec c
-	jp p,N1452_l
+N1452_regs_done:
 	ld a,($02E3)
 	ld hl,VIC_REGS+$1D
 	call N1452_set
@@ -55,7 +58,6 @@ N1452_csame:
 	ld hl,VIC_REGS+$10
 	call N1452_set
 	call k_c2                   ; leave with C64 block 3 mapped (caller's state)
-	pop ix
 	ld d,0
 	ld e,$FF
 	ld c,$FE
@@ -68,4 +70,22 @@ N1452_set:                      ; plain VIC register: store, flag a change (A cl
 	ld (hl),a
 	ld a,1
 	ld (vic_changed),a
+	ret
+
+; Eight linear source bytes to even/odd VIC sprite registers. C accumulates
+; changes across both streams; all addresses remain within their initial page.
+N1452_xy:
+	ld b,8
+N1452_xy_loop:
+	ld a,(de)
+	cp (hl)
+	jr z,N1452_xysame
+	ld a,(hl)
+	ld (de),a
+	ld c,1
+N1452_xysame:
+	inc l
+	inc e
+	inc e
+	djnz N1452_xy_loop
 	ret

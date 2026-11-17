@@ -64,6 +64,22 @@ k_callc64:
 k_jpix:
 	jp (ix)
 
+; HL = C64 target. Call it directly, then restore segment 8 (native dispatcher).
+; Preserve target AF across lookup and segment changes, as k_jmpind does.
+k_callind8:
+	ex af,af'
+	call k_lookup
+	ld (cur_p1),a
+	out (PORT_P1),a
+	ex af,af'
+	call k_jpix
+	ex af,af'
+	ld a,8
+	ld (cur_p1),a
+	out (PORT_P1),a
+	ex af,af'
+	ret
+
 ; HL = C64 address -> IX = Z80 address, A = segment.  Clobbers HL.
 ; Hash table built by tools/build.py: slot = (lo + 7*hi) & 127, linear probing.
 k_lookup:

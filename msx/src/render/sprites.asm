@@ -747,29 +747,24 @@ spc_w:
 	ld a,42
 spc_h:
 	ld (spr_tmp+7),a
-	; slot = (pointer + 7*colour + 31*flags) & 63
-	ld a,(spr_tmp+12)
+	; slot = (pointer + colour + 7*flags) & 127
+	ld a,(spr_tmp+11)
 	ld b,a
 	add a,a
 	add a,a
 	add a,a
 	sub b
 	ld b,a
-	ld a,(spr_tmp+11)
-	ld c,a
-	add a,a
-	add a,a
-	add a,a
-	add a,a
-	add a,a
-	sub c
+	ld a,(spr_tmp+12)
 	add a,b
 	ld b,a
 	ld a,(spr_tmp+10)
 	add a,b
 	and SC_SLOTS-1
 	ld (spr_tmp+15),a
-	; 2-way: try slot, then slot^1; on miss evict a random one of the pair
+	; Two ways: fill an invalid entry first, otherwise evict the older one.
+	; Byte 6 of the even entry records the most recently used way (0/1).
+spc_select:
 	call spc_chk
 	jr c,spc_pos
 	ld a,(spr_tmp+15)
@@ -777,13 +772,33 @@ spc_h:
 	ld (spr_tmp+15),a
 	call spc_chk
 	jr c,spc_pos
-	ld a,r
-	and 1
-	ld b,a
 	ld a,(spr_tmp+15)
 	and $FE
+	ld (spr_tmp+15),a
+	call spc_ent
+	ld de,5
+	add hl,de
+	ld a,(hl)                   ; even entry valid?
+	or a
+	jr z,spc_victim
+	ld de,8
+	add hl,de
+	ld a,(hl)                   ; odd entry valid?
+	or a
+	ld a,1
+	jr z,spc_way
+	ld de,-7                    ; even entry + 6: most recent way
+	add hl,de
+	ld a,(hl)
+	xor 1
+	and 1
+spc_way:
+	ld b,a
+	ld a,(spr_tmp+15)
 	or b
 	ld (spr_tmp+15),a
+spc_victim:
+	ld a,(spr_tmp+15)
 	call spc_ent
 	ex de,hl
 	ld hl,spr_tmp+10
@@ -791,6 +806,8 @@ spc_h:
 	ldir
 	ld a,1
 	ld (de),a
+	ex de,hl                    ; entry + 5, as at a cache hit
+	call spc_recent
 	; mark the slot live for r_sci's invalidation scan (frame.asm)
 	ld a,(spr_tmp+15)
 	ld c,a                      ; C = slot
@@ -865,13 +882,12 @@ spc_dd:
 
 ; A = slot -> HL = SCACHE entry
 spc_ent:
+	; SCACHE is $800-aligned: include its base before multiplying by 8.
 	ld l,a
-	ld h,0
+	ld h,SCACHE/2048
 	add hl,hl
 	add hl,hl
 	add hl,hl
-	ld de,SCACHE
-	add hl,de
 	ret
 ; CF=1 if slot (spr_tmp+15) holds key spr_tmp+10..14
 spc_chk:
@@ -889,6 +905,12 @@ spc_cmp:
 	ld a,(hl)
 	or a
 	ret z
+spc_recent:
+	res 3,l                     ; same pair's even entry + 5
+	inc l                       ; +6: most recently used way
+	ld a,(spr_tmp+15)
+	and 1
+	ld (hl),a
 	scf
 	ret
 spc_no:
@@ -951,6 +973,25 @@ spr_cols:
 	add hl,hl
 	ld de,$8000
 	add hl,de
+	if IRQ_NATIVE_MODE
+	; A race callback can rewrite this bitmap during an upload. Capture only
+	; this cache miss's 63 source bytes, atomically, before streaming any row.
+	ld a,i
+	jp pe,spr_source_iff
+	ld a,i
+spr_source_iff:
+	push af
+	di
+	ld de,SPR_SRC
+	ld bc,63
+	ldir
+spr_source_captured:
+	pop af
+	jp po,spr_source_ready
+	ei
+spr_source_ready:
+	ld hl,SPR_SRC
+	endif
 	; spr_tmp+11 bit 1 (x-expand) is constant for the whole sprite: test it
 	; once here instead of on every one of the 126 spr_nib calls below.
 	ld a,(spr_tmp+11)
@@ -961,6 +1002,7 @@ spr_cols:
 	ld a,(spr_tmp+11)
 	bit 2,a
 	jp nz,spr_rows_n
+spr_stream_begin:
 	push hl
 	pop ix
 	ld a,21
@@ -1034,7 +1076,7 @@ spr_row_n:
 	push bc
 	push hl
 	; 3 bytes -> 18 output bytes in BUF (36 px)
-	ld ix,BUF
+	ld de,BUF
 	ld b,3
 spr_byte_n:
 	ld a,(hl)
@@ -1068,7 +1110,7 @@ spr_row_x:
 	push bc
 	push hl
 	; 3 bytes -> 36 output bytes in BUF (x-expanded)
-	ld ix,BUF
+	ld de,BUF
 	ld b,3
 spr_byte_x:
 	ld a,(hl)
@@ -1104,7 +1146,7 @@ spr_send:
 	ld c,V_CMD
 	otir
 	ret
-; nibble A (low 4 bits) -> 3 bytes at IX
+; nibble A (low 4 bits) -> 3 bytes at DE
 spr_nib_n:
 	and $0F
 	add a,a
@@ -1112,18 +1154,18 @@ spr_nib_n:
 	ld l,a
 	ld h,NT/256
 	ld a,(hl)
-	ld (ix+0),a
+	ld (de),a
+	inc de
 	inc l
 	ld a,(hl)
-	ld (ix+1),a
+	ld (de),a
+	inc de
 	inc l
 	ld a,(hl)
-	ld (ix+2),a
-	inc ix
-	inc ix
-	inc ix
+	ld (de),a
+	inc de
 	ret
-; nibble A (low 4 bits) -> 6 bytes at IX (x-expanded)
+; nibble A (low 4 bits) -> 6 bytes at DE (x-expanded)
 spr_nib_x:
 	and $0F
 	add a,a
@@ -1133,24 +1175,28 @@ spr_nib_x:
 	ld l,a
 	ld h,NTX/256
 	ld a,(hl)
-	ld (ix+0),a
+	ld (de),a
+	inc de
 	inc l
 	ld a,(hl)
-	ld (ix+1),a
+	ld (de),a
+	inc de
 	inc l
 	ld a,(hl)
-	ld (ix+2),a
+	ld (de),a
+	inc de
 	inc l
 	ld a,(hl)
-	ld (ix+3),a
+	ld (de),a
+	inc de
 	inc l
 	ld a,(hl)
-	ld (ix+4),a
+	ld (de),a
+	inc de
 	inc l
 	ld a,(hl)
-	ld (ix+5),a
-	ld de,6
-	add ix,de
+	ld (de),a
+	inc de
 	ret
 
 ; Expand the current 16 NT entries into six sprite bytes each.

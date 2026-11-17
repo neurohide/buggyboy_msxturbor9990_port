@@ -41,11 +41,31 @@ SEG_CAPACITY = 0x3C00         # bytes of translated code per 16K segment
 # weights for placing caller and callee in one segment
 HOT_JSR = {0x1139: 1003, 0x1270: 1003, 0x127B: 1003, 0x127E: 1003, 0x1281: 1003, 0x1284: 1003, 0x1287: 1003, 0x128A: 1003, 0x128D: 1003, 0x1290: 1003, 0x1293: 1003, 0x1296: 1003, 0x1299: 1003, 0x129C: 1003, 0x129F: 1003, 0x1620: 36, 0x1645: 989, 0x1659: 989, 0x166D: 989, 0x1681: 989, 0x1695: 989, 0x16A9: 989, 0x16BD: 989, 0x1920: 1010, 0x1928: 1010, 0x19CB: 252, 0x19D3: 252, 0x1AFC: 902, 0x1C24: 339, 0x1C3B: 300, 0x1E4A: 381, 0x2870: 753, 0x2873: 753, 0x2876: 1453, 0x2879: 1453, 0x287C: 753, 0x287F: 753, 0x2882: 753, 0x2885: 753, 0x2888: 753, 0x288B: 753, 0x288E: 753, 0xB784: 1003, 0xB78A: 1003, 0xB952: 902, 0xCA51: 4}
 # hand-written Z80 replacing C64 code: start -> (end, file under src/native)
-NATIVE = {0x1382: (0x13FD, 'n1382.asm'),
+NATIVE = {0x11A1: (0x11B0, 'n11a1.asm'),
+          0x1382: (0x13FD, 'n1382.asm'),
           0x1452: (0x1486, 'n1452.asm'),
           0x9A2A: (0x9A93, 'n9a2a.asm'),
           0x9BE0: (0x9BF2, 'n9be0.asm')}
+if os.environ.get('SPRITE_COPY_NATIVE', '1') == '1':
+    NATIVE[0xBDC6] = (0xBDD0, 'nbdc6.asm')
+    NATIVE[0xBDD1] = (0xBDDB, 'nbdd1.asm')
+if os.environ.get('DISPATCH_NATIVE', '1') == '1':
+    NATIVE[0x1634] = (0x16D1, 'n1634.asm')
 NATIVE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'src', 'native')
+# Enabled after differential state replay and repeated 240-pass benchmarks.
+# ab retains the translated oracle alongside the native handlers.
+IRQ_NATIVE = os.environ.get('IRQ_NATIVE', '1')
+IRQ_BLOCKS = {0x10E3: (0x11C5, 'nirq10e3.asm'),
+              0x11C5: (0x132F, 'nirq11c5.asm'),
+              0x134C: (0x141A, 'nirq134c.asm'),
+              0x141A: (0x144C, 'nirq141a.asm')}
+if IRQ_NATIVE not in ('0', '1', 'ab'):
+    raise ValueError('IRQ_NATIVE must be 0, 1, or ab')
+if IRQ_NATIVE != '0':
+    for address in (0x11A1, 0x1382):
+        NATIVE.pop(address)
+if IRQ_NATIVE == '1':
+    NATIVE.update(IRQ_BLOCKS)
 # code whose (zp),y stores always hit the VIC bank (road drawer: bitmap
 # pointers from tables; checked over a full race: no store left the bank)
 VIC_PTR_CODE = ((0x289C, 0x3508),)
@@ -693,6 +713,25 @@ class Gen:
             self.emit('call k_farcall', 'db %d' % (SEG_CODE_FIRST + tseg), 'dw ' + L(target))
 
     # ---- one instruction ----------------------------------------------------
+    def native_irq(self, address, cur_seg, differential=False):
+        import re
+        end, filename = IRQ_BLOCKS[address]
+        source = open(os.path.join(NATIVE_DIR, filename)).read()
+        if differential:
+            source = re.sub(r'\bT_([0-9A-F]+)',
+                            lambda m: ('NIRQ_' + m[1]) if address <= int(m[1], 16) < end else m[0],
+                            source)
+        for line in source.splitlines():
+            if line.strip().startswith('@call '):
+                target = int(line.split()[1], 16)
+                self.call_to(target, cur_seg)
+            elif line.strip().startswith('@escape '):
+                target = int(line.split()[1], 16)
+                self.emit('call k_escape', 'db %d' % (SEG_CODE_FIRST + self.seg_of[target]),
+                          'dw ' + L(target))
+            elif line.strip() and not line.lstrip().startswith(';'):
+                self.out.append(line)
+
     def instr(self, a, cur_seg):
         tr = self.tr
         d = tr.ins[a]
@@ -702,10 +741,16 @@ class Gen:
         if a in tr.block_start:
             self.cs = 'P'
         text = mn + ('' if v is None else (' #$%02X' % v if mode == 'imm' else ' $%04X' % v))
+        if IRQ_NATIVE == 'ab' and a in IRQ_BLOCKS:
+            self.out.append('NIRQ_AB_%04X:' % a)
+            self.native_irq(a, cur_seg, differential=True)
         nat = next((k for k, (e, f) in NATIVE.items() if k <= a < e), None)
         if nat is not None:
             if a == nat:
                 self.out.append('%s:\t\t\t; %04X-%04X native' % (L(a), a, NATIVE[a][0] - 1))
+                if a in IRQ_BLOCKS:
+                    self.native_irq(a, cur_seg)
+                    return
                 for l in open(os.path.join(NATIVE_DIR, NATIVE[a][1])):
                     l = l.rstrip()
                     if l and not l.lstrip().startswith(';'):
@@ -719,14 +764,9 @@ class Gen:
         if a == 0x3502:  # translated road drawer's final RTS
             self.out.extend(('if MSX2PLUS', '\tcall race_ready', 'endif'))
         if a == MAIN_LOOP:
-            # game-loop pass: its new state is worth one render (flags preserved)
-            # game-loop pass: hold passes to one per PACE_VBLS vblanks (steady game
-            # speed); its new state is worth one render (mt_sync), except a pass
-            # that started late after a rendered one: skip that render so the
-            # game catches up.  A far-behind schedule (menus, pauses) restarts.
-            # Registers and flags preserved.
-            # An early pass asks for its render before waiting for its slot: the
-            # render (vblank ISR) then overlaps the wait instead of following it.
+            # Pace race passes and render each completed pass. Preserve the
+            # translated registers/flags; reset a schedule left behind by menus.
+            # An early pass renders before waiting, using that wait for useful work.
             p = L(a)
             self.emit('push af', 'push hl', 'ld hl,pace_due',
                       'ld a,(frame_count)', 'sub (hl)', 'jp p,%s_pl' % p,

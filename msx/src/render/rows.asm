@@ -405,9 +405,22 @@ chd_prepare:
 	rlca                        ; high byte * 4 = chunk index
 	ld l,a
 	ld h,VDW/256
-	ld de,CHDIRTY
 	xor a
 	ld (any_chd),a
+	; CHDIRTY is read only when any_chd is nonzero. Leave its old bytes
+	; untouched when this charset has no writes in the frame snapshot.
+	push hl
+	ld b,32
+chp_probe:
+	or (hl)
+	jr nz,chp_expand
+	inc l
+	djnz chp_probe
+	pop hl
+	ret
+chp_expand:
+	pop hl
+	ld de,CHDIRTY
 	ld a,32
 	ld (rgn_idx),a
 chp_l:

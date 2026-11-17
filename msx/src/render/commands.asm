@@ -6,11 +6,17 @@ v_wait:
 	in a,(V_STAT)
 	rrca
 	jr c,v_wait
+v_wait_done:
 	ret
 
 v_send_cmd:                     ; write R#32..R#52 atomically
 	call v_wait
-	call k_get_iff
+	; Keep IFF2 in P/V directly, avoiding a helper call and boolean conversion.
+	; Read twice for the interrupt-acceptance race, as in k_get_iff.
+	ld a,i
+	jp pe,vsc_iff
+	ld a,i
+vsc_iff:
 	push af
 	di
 	ld a,(cmdblk+20)
@@ -39,8 +45,7 @@ vsc_op:
 	ld a,(cmdblk+20)
 	out (V_REG),a
 	pop af
-	or a
-	ret z
+	ret po
 	ei
 	ret
 

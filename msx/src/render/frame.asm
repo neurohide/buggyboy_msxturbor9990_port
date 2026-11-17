@@ -9,31 +9,16 @@ render_frame:
 	call z,render_first
 	; take the dirty flags
 	di
+r_dirty_begin:
 	ld hl,VDIRTY
 	ld de,VDW
-	ld bc,256
-	ldir
-	; clear VDIRTY: write one zero and replicate it with LDIR (a byte
-	; loop costs ~29 cycles per byte on the Z80, LDIR is 16)
-	ld hl,VDIRTY
-	ld (hl),0
-	ld d,h
-	ld e,l
-	inc de
-	push bc
-	ld bc,255
-	ldir
-	pop bc
+	ld b,32
+	call r_take8
 	ld hl,cdirty
 	ld de,cdw
-	ld bc,16
-	ldir
-	ld hl,cdirty
-	ld b,16
-r_clr2:
-	ld (hl),0
-	inc hl
-	djnz r_clr2
+	ld b,2
+	call r_take8
+r_dirty_done:
 	ei
 	; sprite shapes the game rewrote (one 64-byte chunk per pointer): drop
 	; their cached copies so they are rendered again.  Only the live slots
@@ -50,13 +35,7 @@ r_sci:
 	add hl,de
 	ld a,(hl)                   ; slot number
 	push af
-	add a,a
-	add a,a
-	add a,a
-	ld e,a
-	ld d,0
-	ld hl,SCACHE
-	add hl,de                   ; slot entry
+	call spc_ent                ; full 10-bit slot offset (128 entries x 8)
 	ld e,(hl)                   ; key byte 0 = pointer chunk
 	ld d,VDW/256
 	ld a,(de)
@@ -150,6 +129,53 @@ rr_next:
 	ld (cur_p3),a
 	out (PORT_P3),a
 	jp k_map_c2
+
+; Transfer and clear one aligned dirty table atomically. Eight copies per
+; branch, low-byte increments only; both tables stay within their pages.
+; B = number of eight-byte groups, HL = source, DE = destination.
+r_take8:
+	ld a,(hl)
+	ld (de),a
+	ld (hl),0
+	inc l
+	inc e
+	ld a,(hl)
+	ld (de),a
+	ld (hl),0
+	inc l
+	inc e
+	ld a,(hl)
+	ld (de),a
+	ld (hl),0
+	inc l
+	inc e
+	ld a,(hl)
+	ld (de),a
+	ld (hl),0
+	inc l
+	inc e
+	ld a,(hl)
+	ld (de),a
+	ld (hl),0
+	inc l
+	inc e
+	ld a,(hl)
+	ld (de),a
+	ld (hl),0
+	inc l
+	inc e
+	ld a,(hl)
+	ld (de),a
+	ld (hl),0
+	inc l
+	inc e
+	ld a,(hl)
+	ld (de),a
+	ld (hl),0
+	inc l
+	inc e
+	djnz r_take8
+	ret
 
 render_first:
 	ld a,1

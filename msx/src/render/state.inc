@@ -2,6 +2,7 @@
 NT:              equ $6700           ; nibble table: 16 x 4 bytes (3 used)
 NTX:             equ $6780           ; expanded sprite nibbles: 16 x 8 bytes (6 used)
 BUF:             equ $7100           ; cell pixels, line-major, up to 40 cells
+SPR_SRC:         equ BUF+$40         ; cache-miss source; disjoint from sprite row BUF[0..35]
 VDW:             equ $7900           ; work copy of VDIRTY
 CHDIRTY:         equ $7A00           ; per character code
 SCACHE:          equ $6800           ; sprite cache: 128 slots x 8 bytes ($6800-$6BFF, above LTL)
@@ -29,7 +30,7 @@ any_chd:         equ RV+$46
 first_done:      equ RV+$47
 slot_of:         equ RV+$48          ; 16: C64 colour -> palette slot (0 = none)
 next_slot:       equ RV+$58
-celldirty:       equ $5D00           ; 40 + sentinel $80, clear of the CMMC tables
+celldirty:       equ $5F00           ; 40 + sentinel $80, below LTL; guarded by build.py
 tl_ptr:          equ RV+$81          ; 2: next event record
 tl_left:         equ RV+$83          ; events left
 rec_cur:         equ RV+$84          ; 2
@@ -46,6 +47,7 @@ rdc_gf:          equ spr_tmp+20      ; rd_cells: group-changed flag (sprites are
 rdc_bg:          equ spr_tmp+21      ; rd_cells: bitmap dirty bits of the group, shifted per cell
 rdc_gs:          equ spr_tmp+22      ; rd_cells: first column of the group
 dr_shad:         equ spr_tmp+23      ; draw_run: shadow entry for the current cell
+csf_need:        equ spr_tmp+25      ; 38-column border needs repair after row draws
 row_cram:        equ RV+$A2          ; 2: COLOR_RAM + r*40 (renderer_setup_row)
 row_shad:        equ RV+$AD          ; 2: SHADOW + r*400 (renderer_setup_row)
 rgn_rec:         equ RV+$A5          ; 2 record of the sprite region
@@ -62,6 +64,10 @@ cm_x:            equ RV+$CF          ; fg value * $55: XOR makes fg pixels 00
 cm_lv:           equ RV+$5A          ; cm_lfc/cm_lbc hold what R#48-51 contain
 cm_lfc:          equ RV+$5B
 cm_lbc:          equ RV+$5C
+CM_HA:           equ $F400           ; hires CMMC masks in SEG_SHADOW (four pages)
+CM_HB:           equ $F500
+CM_HC:           equ $F600
+CM_HD:           equ $F700
 CM_TA:           equ $6D00           ; CMMC tables moved out of renderer code space
 CM_TB:           equ $6E00           ; per byte (bit 11 = left pixel, fg pixel = 1):
 CM_TC:           equ $6F00           ; TA = bits 11-4, TB = bits 3-0 << 4,
