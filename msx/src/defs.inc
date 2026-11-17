@@ -88,7 +88,8 @@ irq_count:       equ KVARS+$B4       ; 2 bytes
 vbl_pending:     equ KVARS+$B6
 cur_p3:          equ KVARS+$B7       ; mapper segment in page 3
 irq_late:        equ KVARS+$B8       ; raster line armed after it had passed
-LU_CACHE:        equ $3060           ; 16 x 5: direct-mapped k_lookup cache (C64 lo, hi, seg, Z80 addr); 0 = empty
+LU_CACHE:        equ $3060           ; 32 x 5: direct-mapped k_lookup cache (C64 lo, hi, seg, Z80 addr); 0 = empty
+LU_SLOTS:        equ 32              ; ends at $30FF, before TIMELINE
 lu_cache:        equ KVARS+$B9       ; 5: last k_lookup (C64 addr, seg, Z80 addr)
 page_back:       equ KVARS+$BE       ; display page being drawn (0/1)
 flip_pending:    equ KVARS+$BF       ; back page complete: show it at vblank

@@ -183,6 +183,46 @@ ntb_h3:
 	jr nz,ntb_h
 	ret
 
+; Fast single-colour check for the common $00/$FF cells, without NT.
+; HL = 8 source bytes: Z and A = repeated colour byte on a match; HL kept.
+cell_plain_uniform:
+	push hl
+	ld a,(hl)
+	or a
+	jr z,cpu_zero
+	cp $FF
+	jr nz,cpu_miss
+	ld a,(cell_cols)
+	or a
+	ld de,cell_cols+2          ; hires $FF = colour 1
+	jr z,cpu_check
+	ld de,cell_cols+4          ; multicolour $FF = colour 3
+	jr cpu_check
+cpu_zero:
+	ld de,cell_cols+1          ; $00 = colour 0 in both modes
+cpu_check:
+	ld a,(hl)
+	ld b,7
+cpu_next:
+	inc hl
+	cp (hl)
+	jr nz,cpu_miss
+	djnz cpu_next
+	pop hl
+	ld a,(de)
+	ld b,a
+	add a,a
+	add a,a
+	add a,a
+	add a,a
+	or b
+	cp a                        ; Z, with A = repeated colour byte
+	ret
+cpu_miss:
+	pop hl
+	or 1                        ; NZ
+	ret
+
 ; HL = 8 source bytes: Z and A = colour byte if the whole cell is one colour
 ; (8 equal bytes whose two nibbles expand to 6 equal bytes).  Preserves HL.
 cell_uniform:

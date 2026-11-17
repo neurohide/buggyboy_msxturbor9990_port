@@ -32,7 +32,6 @@ NR_g1:
 	inc (hl)
 NR_g2:
 	xor a
-	ld (NR_gd),a
 	ld ($0050),a
 	ld ($3002),a
 	; per line: NR_cc = calls its 4 edge inputs stayed equal (max 2).
@@ -69,12 +68,46 @@ NR_p4:
 	xor a
 	ld (de),a
 	ld (hl),a
+	ld a,1
+	ld (NR_gd),a
 NR_p5:
 	inc hl
 	inc de
 	djnz NR_p3
+	ld a,(NR_gd)
+	or a
+	jr z,NR_unchanged
+	xor a
+	ld (NR_same),a
+	jr NR_draw
+NR_unchanged:
+	ld a,(NR_gc)
+	cp 2
+	jr c,NR_count_same
+	ld a,(NR_same)
+	or a
+	jr nz,NR_fast_return
+NR_count_same:
+	ld hl,NR_same
+	ld a,(hl)
+	cp 2
+	jr nc,NR_draw
+	inc (hl)
+NR_draw:
+	xor a
+	ld (NR_gd),a
 	ld bc,8
 	jr NR_line
+NR_fast_return:
+	xor a
+	ld (NR_gd),a
+	ld bc,8
+	ld d,0
+	ld hl,$0050
+	ld a,$48
+	ld (hl),a
+	cp $48                     ; match the final line's exit flags
+	jp NR_exit
 NR_pd:
 	ld a,(hl)
 	ld (de),a
@@ -1010,6 +1043,8 @@ NR_gv:
 NR_gd:
 	db 0
 NR_gc:                          ; reset by the translated general path (translate.py)
+	db 0
+NR_same:                        ; consecutive calls with unchanged inputs, max 2
 	db 0
 NR_lnc:
 	db 0

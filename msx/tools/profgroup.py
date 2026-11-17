@@ -12,6 +12,8 @@ for l in open(sys.argv[1]):
     n = name(t, int(p[0], 16), int(p[1], 16))
     if n.startswith('r:'):
         k = 'renderer'
+    elif n.startswith('a:'):
+        k = 'audio'
     elif n.startswith('T_'):
         k = 'game'
         top[n] += 1
@@ -25,7 +27,7 @@ for l in open(sys.argv[1]):
 tot = sum(g.values())
 kern = sum(v for k, v in g.items() if k.startswith('kernel:'))
 print('total', tot)
-for k in ('game', 'renderer', 'irq/sound/input'):
+for k in ('game', 'renderer', 'audio', 'irq/sound/input'):
     print('%-16s %5.1f%%' % (k, 100.0 * g[k] / tot))
 print('%-16s %5.1f%%' % ('kernel helpers', 100.0 * kern / tot))
 for k, v in sorted(((k, v) for k, v in g.items() if k.startswith('kernel:')), key=lambda x: -x[1])[:12]:

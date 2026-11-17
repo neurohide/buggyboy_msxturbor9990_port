@@ -43,8 +43,6 @@ cc_src:
 	add hl,hl
 	ld de,(row_data)
 	add hl,de
-	ld a,1
-	ld (cc_hit),a
 	ret
 cc_new:
 	xor a

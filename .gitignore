@@ -5,3 +5,5 @@ __pycache__/
 msx/build/*
 !msx/build/buggyboy.rom
 intro/data.inc
+.agents
+claude-history

@@ -163,13 +163,20 @@ dr_cell:
 	push hl
 	call shadow_store
 	pop hl
+	call cell_plain_uniform
+	jr z,dr_uniform
 	push hl
 	ld a,(cc_hit)
 	or a
-	call z,nt_build             ; rows phase: only dr_cell builds NT
+	jr nz,dr_nt_ready
+	call nt_build
+	ld a,1
+	ld (cc_hit),a
+dr_nt_ready:
 	pop hl
 	call cell_uniform
 	jr nz,dr_pix
+dr_uniform:
 	; one colour: merge with the pending fill when it continues it
 	ld b,a
 	ld a,(pf_n)

@@ -41,7 +41,10 @@ SEG_CAPACITY = 0x3C00         # bytes of translated code per 16K segment
 # weights for placing caller and callee in one segment
 HOT_JSR = {0x1139: 1003, 0x1270: 1003, 0x127B: 1003, 0x127E: 1003, 0x1281: 1003, 0x1284: 1003, 0x1287: 1003, 0x128A: 1003, 0x128D: 1003, 0x1290: 1003, 0x1293: 1003, 0x1296: 1003, 0x1299: 1003, 0x129C: 1003, 0x129F: 1003, 0x1620: 36, 0x1645: 989, 0x1659: 989, 0x166D: 989, 0x1681: 989, 0x1695: 989, 0x16A9: 989, 0x16BD: 989, 0x1920: 1010, 0x1928: 1010, 0x19CB: 252, 0x19D3: 252, 0x1AFC: 902, 0x1C24: 339, 0x1C3B: 300, 0x1E4A: 381, 0x2870: 753, 0x2873: 753, 0x2876: 1453, 0x2879: 1453, 0x287C: 753, 0x287F: 753, 0x2882: 753, 0x2885: 753, 0x2888: 753, 0x288B: 753, 0x288E: 753, 0xB784: 1003, 0xB78A: 1003, 0xB952: 902, 0xCA51: 4}
 # hand-written Z80 replacing C64 code: start -> (end, file under src/native)
-NATIVE = {0x1452: (0x1486, 'n1452.asm')}
+NATIVE = {0x1382: (0x13FD, 'n1382.asm'),
+          0x1452: (0x1486, 'n1452.asm'),
+          0x9A2A: (0x9A93, 'n9a2a.asm'),
+          0x9BE0: (0x9BF2, 'n9be0.asm')}
 NATIVE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'src', 'native')
 # code whose (zp),y stores always hit the VIC bank (road drawer: bitmap
 # pointers from tables; checked over a full race: no store left the bank)
@@ -756,7 +759,7 @@ class Gen:
                     self.emit('jr z,%s_%04X' % (L(a), v), 'jp p,%s_g' % L(a), '%s_%04X:' % (L(a), v))
             self.emit('jp %s' % L(a + SPEC_OFS), '%s_g:' % L(a))
             if ROAD_NATIVE != '0':
-                self.emit('xor a', 'ld (NR_gc),a')   # native line cache invalid
+                self.emit('xor a', 'ld (NR_gc),a', 'ld (NR_same),a')  # native cache invalid
         if a in VIC_MAP_ENTRY:
             self.emit('call k_vic_on')
         nz = lo & (N | Z)

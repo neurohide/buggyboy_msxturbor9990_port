@@ -1,5 +1,6 @@
 ; Renderer memory map and per-frame state.
 NT:              equ $6700           ; nibble table: 16 x 4 bytes (3 used)
+NTX:             equ $6780           ; expanded sprite nibbles: 16 x 8 bytes (6 used)
 BUF:             equ $7100           ; cell pixels, line-major, up to 40 cells
 VDW:             equ $7900           ; work copy of VDIRTY
 CHDIRTY:         equ $7A00           ; per character code
@@ -66,7 +67,7 @@ CM_TB:           equ $6E00           ; per byte (bit 11 = left pixel, fg pixel =
 CM_TC:           equ $6F00           ; TA = bits 11-4, TB = bits 3-0 << 4,
 CM_TD:           equ $7000           ; TC = bits 11-8, TD = bits 7-0
 CM_PT:           equ $6600           ; byte -> mask of the 2-bit pixel values in it
-cc_hit:          equ RV+$CB          ; cell_colours reused cell_cols (so NT is still built for it)
+cc_hit:          equ RV+$CB          ; NT currently matches cell_cols
 rgn_idx:         equ RV+$AC
 dbg_cells:       equ RV+$F0          ; 2: cells drawn last frame
 dbg_full:        equ RV+$F2          ; rows fully redrawn last frame

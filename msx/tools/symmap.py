@@ -39,12 +39,14 @@ def load():
     for key, path in sources:
         names = code_labels(path)
         tables.setdefault(key, []).extend((lab[n], n) for n in names if n in lab)
+    audio = os.path.join(ROOT, 'src', 'kernel', 'p2_audio.asm')
+    tables['a'] = [(lab[n], n) for n in code_labels(audio) if n in lab]
     seg = None
     for l in open(os.path.join(ROOT, 'build', 'code.asm')):
         m = re.match(r'seg(\d+)_start:', l)
         if m:
             seg = int(m.group(1)) + SEG_CODE
-        m = re.match(r'(T_[0-9A-F]{4}):', l)
+        m = re.match(r'(T_[0-9A-F]{4,5}):', l)
         if m:
             tables.setdefault(seg, []).append((lab[m.group(1)], m.group(1)))
     for t in tables.values():
@@ -60,6 +62,8 @@ def lookup(t, pc):
 def name(tables, seg, pc):
     if 0x4000 <= pc < 0x8000:
         if seg == SEG_RENDER:
+            if pc >= tables['a'][0][0]:
+                return 'a:' + lookup(tables['a'], pc)
             return 'r:' + lookup(tables['r'], pc)
         if seg in tables:
             return lookup(tables[seg], pc)

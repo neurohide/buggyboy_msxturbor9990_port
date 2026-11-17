@@ -304,13 +304,13 @@ sp_one:
 	push hl
 	pop iy                      ; IY -> VIC regs of the region
 	ld a,(rgn_idx)
-	ld b,a
-	inc b
+	ld l,a
+	ld h,bittab/256
+	ld b,(hl)
 	ld a,(iy+$15)
 spo_en:
-	rrca
-	djnz spo_en
-	ret nc                      ; not enabled
+	and b
+	ret z                       ; not enabled
 	; first raster line = Y + 1
 	ld a,(rgn_idx)
 	add a,a
@@ -343,16 +343,16 @@ spo_en:
 	ret nc
 	; x = SCREEN_X + (X9 - 24) * 3 / 2 ; y = Y + 1 - 51 + SCREEN_Y
 	ld a,(rgn_idx)
-	ld b,a
-	inc b
+	ld l,a
+	ld h,bittab/256
+	ld b,(hl)
 	ld a,(iy+$10)
 spo_msb:
-	rrca
-	djnz spo_msb
+	and b
 	ld a,(spr_tmp)
 	ld l,a
 	ld h,0
-	jr nc,spo_nomsb
+	jr z,spo_nomsb
 	inc h
 spo_nomsb:
 	ld de,-24
@@ -923,6 +923,9 @@ spr_hi:
 	ld (cell_cols+2),a
 spr_cols:
 	call nt_build
+	ld a,(spr_tmp+11)
+	bit 1,a
+	call nz,spr_ntx_build
 	; LMMC into the slot
 	call spc_pos
 	ld (cmdblk+4),hl
@@ -1125,32 +1128,66 @@ spr_nib_x:
 	and $0F
 	add a,a
 	add a,a
+	add a,a
+	or NTX & $FF
 	ld l,a
-	ld h,NT/256
-	ld e,3
-snx_l:
+	ld h,NTX/256
+	ld a,(hl)
+	ld (ix+0),a
+	inc l
+	ld a,(hl)
+	ld (ix+1),a
+	inc l
+	ld a,(hl)
+	ld (ix+2),a
+	inc l
+	ld a,(hl)
+	ld (ix+3),a
+	inc l
+	ld a,(hl)
+	ld (ix+4),a
+	inc l
+	ld a,(hl)
+	ld (ix+5),a
+	ld de,6
+	add ix,de
+	ret
+
+; Expand the current 16 NT entries into six sprite bytes each.
+spr_ntx_build:
+	ld hl,NT
+	ld de,NTX
+	ld b,16
+snxb_row:
+	push bc
+	ld b,3
+snxb_byte:
 	ld a,(hl)
 	and $F0
-	ld d,a
+	ld c,a
 	rrca
 	rrca
 	rrca
 	rrca
-	or d
-	ld (ix+0),a
+	or c
+	ld (de),a
+	inc e
 	ld a,(hl)
 	and $0F
-	ld d,a
-	add a,a
-	add a,a
-	add a,a
-	add a,a
-	or d
-	ld (ix+1),a
-	inc ix
-	inc ix
+	ld c,a
+	rlca
+	rlca
+	rlca
+	rlca
+	or c
+	ld (de),a
+	inc e
 	inc l
-	dec e
-	jr nz,snx_l
+	djnz snxb_byte
+	inc l                       ; fourth byte of each NT entry is unused
+	inc e
+	inc e                       ; align next expanded entry to eight bytes
+	pop bc
+	djnz snxb_row
 	ret
 
