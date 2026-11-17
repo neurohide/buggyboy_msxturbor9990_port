@@ -20,4 +20,4 @@ restore_reference() {
 trap restore_reference 0
 IRQ_NATIVE=ab IRQ_SNAPSHOT=1 python3 tools/build.py
 python3 test/irq_ab.py "${OUT}_checks.tcl"
-IRQ_AB_SCRIPT="${OUT}_checks.tcl" sh test/first_race.sh "$OUT" 240
+IRQ_DIFFERENTIAL=1 IRQ_AB_SCRIPT="${OUT}_checks.tcl" sh test/first_race.sh "$OUT" 240

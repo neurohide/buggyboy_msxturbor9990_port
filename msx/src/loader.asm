@@ -259,6 +259,9 @@ ld_table:
 	db 8, SEG_CODE+2
 	db 9, SEG_CODE+3
 	db 10, SEG_SHADOW
+	if ROAD_DIRECT
+	db 11, SEG_ROAD
+	endif
 	db 0
 
 ld_ram_error:

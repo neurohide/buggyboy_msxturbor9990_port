@@ -88,6 +88,7 @@ VIC_MAP_ENTRY = VIC_MAP_ENTRY | {SPEC_RANGE[0] + SPEC_OFS}
 # the specialized copy as hand-written Z80 (ROAD_NATIVE=0: translated copy;
 # =ab: no copy, native at NR_ab next to the original drawer, for test/road_ab.sh)
 ROAD_NATIVE = os.environ.get('ROAD_NATIVE', '1')
+ROAD_DIRECT = os.environ.get('ROAD_DIRECT', '0') == '1'
 SPEC_ON = ROAD_NATIVE != 'ab'
 if ROAD_NATIVE == '1':
     NATIVE[SPEC_RANGE[0] + SPEC_OFS] = (SPEC_RANGE[1] + SPEC_OFS, 'n289c.asm')
@@ -751,7 +752,13 @@ class Gen:
                 if a in IRQ_BLOCKS:
                     self.native_irq(a, cur_seg)
                     return
-                for l in open(os.path.join(NATIVE_DIR, NATIVE[a][1])):
+                source = open(os.path.join(NATIVE_DIR, NATIVE[a][1])).read()
+                if ROAD_DIRECT and NATIVE[a][1] == 'n289c.asm':
+                    # Span writes have no VIC bitmap read/compare. Native edge
+                    # order and footprint-table updates remain unchanged.
+                    source = source.replace('\tcp (hl)\n\tcall nz,NR_st', '\tcall NR_st')
+                    source = source.replace('\tcp (hl)\n\tret z\n\tjp NR_st', '\tjp NR_st')
+                for l in source.splitlines():
                     l = l.rstrip()
                     if l and not l.lstrip().startswith(';'):
                         self.out.append(l)
@@ -764,6 +771,11 @@ class Gen:
         if a == 0x3502:  # translated road drawer's final RTS
             self.out.extend(('if MSX2PLUS', '\tcall race_ready', 'endif'))
         if a == MAIN_LOOP:
+            if ROAD_DIRECT:
+                # Compatibility checkpoint before the next game pass can read
+                # or overlay bitmap data. Direct rendering consumed the spans.
+                self.emit('push hl', 'call k_farcall', 'db SEG_ROAD',
+                          'dw rd_checkpoint', 'pop hl')
             # Pace race passes and render each completed pass. Preserve the
             # translated registers/flags; reset a schedule left behind by menus.
             # An early pass renders before waiting, using that wait for useful work.
@@ -799,6 +811,9 @@ class Gen:
                     self.emit('jr z,%s_%04X' % (L(a), v), 'jp p,%s_g' % L(a), '%s_%04X:' % (L(a), v))
             self.emit('jp %s' % L(a + SPEC_OFS), '%s_g:' % L(a))
             if ROAD_NATIVE != '0':
+                if ROAD_DIRECT:
+                    self.emit('push hl', 'call k_farcall', 'db SEG_ROAD',
+                              'dw rd_checkpoint', 'pop hl')
                 self.emit('xor a', 'ld (NR_gc),a', 'ld (NR_same),a')  # native cache invalid
         if a in VIC_MAP_ENTRY:
             self.emit('call k_vic_on')

@@ -7,4 +7,8 @@
 	include "src/kernel_p2.asm"
 	include "src/render.asm"
 	include "build/code.asm"
+	if ROAD_DIRECT
+	include "src/road/cpu.asm"
+	include "src/road/vdp.asm"
+	endif
 	include "src/loader.asm"

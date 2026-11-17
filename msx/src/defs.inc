@@ -16,6 +16,9 @@ SEG_C3:          equ 7               ; C64 $C000-$FFFF
 SEG_CODE:        equ 8               ; first translated code segment
 SEG_RENDER:      equ 12              ; renderer code + tables (mapped in page 1)
 SEG_SHADOW:      equ 13              ; renderer: last drawn cell inputs (mapped in page 3)
+SEG_ROAD:        equ 14              ; optional road span producer and V9990 consumer
+road_active:    equ $2FE1           ; span records own the road bitmap until checkpoint
+road_repair:    equ $2FE2           ; bitmap materialized: invalidate renderer road rows
 
 ; ---- V9990 (Gfx9000) --------------------------------------------------------
 V_VRAM:          equ $60             ; P#0 VRAM data

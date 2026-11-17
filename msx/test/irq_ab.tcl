@@ -147,6 +147,7 @@ proc irq_ab::next_case {} {
 proc irq_ab::fail {message} {
  puts stderr "IRQ differential FAILED: $message"
  exit 1
+ error $message
 }
 proc irq_ab::leave {{endpoint return}} {
  variable phase; variable pre; variable ram; variable saved_regs
@@ -202,6 +203,11 @@ proc irq_ab::leave {{endpoint return}} {
  if {[llength $queue]} {next_case; return}
  set phase 0
  if {[llength [info procs ::irq_live::handler]]} {irq_live::handler $handler}
+ if {[info exists ::env(IRQ_LIVE_HANDLER_LIMIT)] && [info exists ::irq_live::complete] && $::irq_live::complete} {
+  set enough 1
+  dict for {name count} $counts {if {$count < $::env(IRQ_LIVE_HANDLER_LIMIT)} {set enough 0}}
+  if {$enough} {finish complete}
+ }
  if {$endpoint eq "escape"} {finish complete}
 }
 proc irq_ab::call {name} {

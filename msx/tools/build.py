@@ -75,6 +75,7 @@ def main():
     msx2plus = os.environ.get('MSX2PLUS', '1').lower() in ('1', 'true', 'yes', 'on')
     with open(os.path.join(BUILD, 'config.inc'), 'w') as f:
         f.write('MSX2PLUS: equ %d\n' % (1 if msx2plus else 0))
+        f.write('ROAD_DIRECT: equ %d\n' % (os.environ.get('ROAD_DIRECT', '0') == '1'))
         f.write('IRQ_SNAPSHOT: equ %d\n' % (os.environ.get('IRQ_SNAPSHOT', '1') == '1'))
         f.write('IRQ_NATIVE_MODE: equ %d\n' % ({'0': 0, '1': 1, 'ab': 2}[
             os.environ.get('IRQ_NATIVE', '1')]))
@@ -93,6 +94,8 @@ def main():
         if r.returncode:
             sys.exit('assembly failed')
     lab = labels(lblf)
+    if lab['ROAD_DIRECT'] and os.environ.get('ROAD_NATIVE', '1') != '1':
+        sys.exit('ROAD_DIRECT requires ROAD_NATIVE=1')
     if lab['IRQ_SNAPSHOT'] and (lab['TL_REC'] != 64 or lab['VIC_REGS'] & 255 or
                                any(lab[k] & 255 for k in ('TL_BASE', 'TIMELINE', 'TIMELINE1'))):
         sys.exit('Sparse IRQ snapshots require page-aligned tables and 64-byte records')
@@ -113,6 +116,9 @@ def main():
              ('render', 'region_render_start', None)]
     for i in range(nseg):
         order.append(('seg%d' % i, 'seg%d_start' % i, None))
+    if lab['ROAD_DIRECT']:
+        order.extend([('road_cpu', 'road_cpu_start', 'road_cpu_end'),
+                      ('road_vdp', 'road_vdp_start', 'road_vdp_end')])
     order.append(('loader', 'loader_start', None))
     pos = 0
     chunks = {}
@@ -152,6 +158,8 @@ def main():
              bytes(mem[0x8000:0xC000]), bytes(mem[0xC000:0x10000]), render]
     for i in range(nseg):
         banks.append(chunks['seg%d' % i][1])
+    if lab['ROAD_DIRECT']:
+        banks += [bytes(0x4000), chunks['road_cpu'][1] + chunks['road_vdp'][1] + bytes(0x2000)]
     for b in banks:
         assert len(b) == 0x4000, len(b)
     if len(banks) > INTRO_BANK:

@@ -103,8 +103,51 @@ rf_page_ready:
 rr_loop:
 	ld (cur_row),a
 	call renderer_setup_row
+	if ROAD_DIRECT
+	ld a,(cur_row)
+	cp 14
+	jr c,rr_bitmap
+	ld a,(road_repair)
+	or a
+	jr z,rr_road_check
+	ld hl,row_full+14
+	ld b,11
+rr_repair:
+	ld (hl),1
+	inc hl
+	djnz rr_repair
+	xor a
+	ld (road_repair),a
+rr_road_check:
+	ld a,(road_active)
+	or a
+	jr z,rr_bitmap
+	ld a,SEG_ROAD
+	ld (cur_p2),a
+	out (PORT_P2),a
+	call rdv_row
+	push af
+	call k_map_vic
+	pop af
+	jr z,rr_sync
+	; An unexpected display mode needs the canonical bitmap before using
+	; the general renderer. The far-call epilogue needs C2 in page 2.
+	call k_map_c2
+	call k_farcall
+	db SEG_ROAD
+	dw rd_checkpoint
+	call k_map_vic
+	ld hl,row_full+14
+	ld b,11
+rr_repair_mode:
+	ld (hl),1
+	inc hl
+	djnz rr_repair_mode
+rr_bitmap:
+	endif
 	call renderer_find_dirty_cells
 	call nz,renderer_draw_dirty_cells
+rr_sync:
 	ld a,(SH_EARLY)
 	or a
 	jr z,rr_next

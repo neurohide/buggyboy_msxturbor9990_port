@@ -5,6 +5,11 @@
 ; (D = 0) for the per-line tables.  L3002 stays 0 (never incremented here) and
 ; L3503 is only ever set to $AA.  Exit as the 6502: X = $48, block 3 mapped.
 	call k_vic_on
+	if ROAD_DIRECT
+	call k_farcall
+	db SEG_ROAD
+	dw rd_begin
+	endif
 	; globals the line conditions read: NR_gc counts calls they stayed equal (max 2)
 	ld hl,NR_gv
 	ld de,$3F75
@@ -715,6 +720,13 @@ NR_nx:
 	cp $48
 	jp nz,NR_line
 NR_exit:
+	if ROAD_DIRECT
+	push hl
+	call k_farcall
+	db SEG_ROAD
+	dw rd_finish
+	pop hl
+	endif
 	call k_c2
 	if MSX2PLUS
 	call race_ready
@@ -848,6 +860,18 @@ NR_e34p:                        ; range line, L02D2 set: edges 3/4 parked
 	call NR_svd
 	jp NR_next
 NR_st:                          ; changed byte: store, mark dirty (A BC DE HL kept)
+	if ROAD_DIRECT
+	push hl
+	push ix
+	push hl
+	pop ix
+	call k_farcall
+	db SEG_ROAD
+	dw rd_put
+	pop ix
+	pop hl
+	ret
+	else
 	ld (hl),a                   ; road stores never reach $FFFF (bitmap rows)
 	push af
 	push hl
@@ -871,6 +895,7 @@ NR_st:                          ; changed byte: store, mark dirty (A BC DE HL ke
 	pop hl
 	pop af
 	ret
+	endif
 NR_ff2:                         ; HL = pointer: [00], [08] = $FF
 	ld a,h
 	or $C0

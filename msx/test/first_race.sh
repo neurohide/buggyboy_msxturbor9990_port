@@ -28,7 +28,10 @@ Path(out+'_result.txt').unlink(missing_ok=True)
 Path(out+'_metadata.json').write_text(json.dumps({
     'rom_sha256': hashlib.sha256(Path('build/buggyboy.rom').read_bytes()).hexdigest(),
     'config': Path('build/config.inc').read_text().strip(),
-    'passes': passes, 'course': course, 'acceleration': True, 'steering': scenario != 'straight',
+    'passes': passes, 'course': course, 'acceleration': True,
+    'steering': scenario != 'straight' or 'IRQ_LIVE_OUT' in os.environ,
+    'live_controls': 'IRQ_LIVE_OUT' in os.environ,
+    'differential': os.environ.get('IRQ_DIFFERENTIAL') == '1',
     'scenario': scenario, 'metrics': os.environ.get('RACE_METRICS') == '1',
     'profile': os.environ.get('PROFILE') == '1',
     'validation': os.environ.get('VALIDATE_SPRITES') == '1',
@@ -52,7 +55,7 @@ puts $::log {pass,time,seconds,flips}
 proc release_fire {} {keymatrixup 8 0x01}
 proc menu_input {} {
  if {$::begun} {return}
- if {$::course_selecting && !$::course_ready} {return}
+ if {$::course_selecting && !$::course_ready} {after time 1 menu_input; return}
  keymatrixdown 8 0x01
  after time 0.5 release_fire
  after time 1 menu_input
@@ -79,7 +82,7 @@ proc finish {status} {
  }
  set f [open "OUT_result.txt" w]
  puts $f "status=$status passes=$::n"
- if {$::begun && $::n>0} {
+ if {$::begun && $::n>0 && !DIFFERENTIAL} {
   set dt [expr {[machine_info time]-$::start}]
   puts $f "seconds=$dt loops_per_second=[expr {$::n/$dt}] flips=$::flips fps=[expr {$::flips/$dt}]"
  }
@@ -169,6 +172,7 @@ replacements.update(STREAMSOURCE=hex(labels['SPR_SRC']) if labels['IRQ_NATIVE_MO
                     STREAMCAPTURE=hex(labels.get('spr_source_captured', 0)))
 replacements['METRICLABELS']=' '.join('%s %d' % pair for pair in labels.items())
 replacements['SCENARIO']=scenario
+replacements['DIFFERENTIAL']='1' if os.environ.get('IRQ_DIFFERENTIAL') == '1' else '0'
 recovery=next((s,a) for s,v in tables.items() if isinstance(s,int) for a,n in v if n=='T_B7C9')
 course_seg,course_addr=next((s,a) for s,v in tables.items() if isinstance(s,int) for a,n in v if n=='T_0B5E')
 replacements.update(COURSE=str(course), COURSEENTRY=hex(course_addr), COURSESEG=str(course_seg))
@@ -186,6 +190,10 @@ else
  "${OPENMSX:-openmsx}" -machine Panasonic_FS-A1GT -ext gfx9000 -cart build/buggyboy.rom -romtype ASCII16 -script "$OUT.tcl" > "$OUT.log" 2>&1
 fi
 cat "${OUT}_result.txt"
+if [ "${IRQ_DIFFERENTIAL:-0}" = 1 ]; then
+ grep -q 'status=complete' "${OUT}_result.txt" || exit 1
+ exit 0
+fi
 python3 - "$OUT" <<'PY'
 import csv, math, statistics, sys
 from pathlib import Path

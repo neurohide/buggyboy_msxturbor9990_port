@@ -95,6 +95,8 @@ def summarize(prefix):
 
 def gate(candidate, baseline):
     reasons = []
+    if candidate['metadata'].get('course', 0) != baseline['metadata'].get('course', 0):
+        reasons.append('Unmatched metadata: course')
     for name, result in (('candidate', candidate), ('baseline', baseline)):
         if not result['measurement_valid']:
             reasons.append(f'{name}: incomplete window, progress, or scenario evidence')

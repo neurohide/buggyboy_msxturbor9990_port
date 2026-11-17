@@ -1,0 +1,14 @@
+{
+  "rom_sha256": "d901216ba89698e4186a4062916493c115c3c1e6a5b3d616fb0bbdf48f2ec318",
+  "config": "MSX2PLUS: equ 1\nIRQ_SNAPSHOT: equ 1\nIRQ_NATIVE_MODE: equ 1",
+  "passes": 240,
+  "course": 0,
+  "acceleration": true,
+  "steering": true,
+  "live_controls": true,
+  "differential": false,
+  "scenario": "straight",
+  "metrics": false,
+  "profile": false,
+  "validation": false
+}

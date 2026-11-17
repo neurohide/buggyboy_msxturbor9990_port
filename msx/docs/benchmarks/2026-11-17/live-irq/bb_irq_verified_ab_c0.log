@@ -1,0 +1,5 @@
+Audio settings: mute=false master_volume=0 PSG_volume=100 devices=cassetteplayer keyclick PSG {MSX Music}
+info: Screen saved to /tmp/bb_irq_verified_ab_c0_start.png
+Live IRQ verification passed: steering left/right, paused 30 handlers, resumed progress; audio=2000 input=2011
+IRQ differential counts: 10E3 1000 11C5 1000 134C 1000 141A 1000 synthetic=0 snapshots=5948 native_seconds=10.817743316539278 translated_seconds=11.60454080057768
+info: Screen saved to /tmp/bb_irq_verified_ab_c0_end.png

@@ -366,3 +366,79 @@ that stall. Profile fields after segment/PC record `in_irq` and `rendering`.
 
 A 3–4x result and playability have not been achieved. The remaining stalls need
 whole rendering/raster stages removed, beyond further leaf instruction tuning.
+
+## Live native-handler verification, 2026-11-17
+
+`sh test/irq_live.sh /tmp/bb_irq_live` builds the differential ROM once, selects
+all five courses through keyboard input, and checks native versus translated
+handlers during live left/right steering and STOP pause/resume. Set
+`IRQ_LIVE_COURSES='0 2 4'` to run an explicit subset (0 OFFROAD, 1 NORTH, 2 EAST,
+3 WEST, 4 SOUTH). Synthetic fixtures remain in `irq_ab.sh`; the live matrix sets
+`IRQ_AB_SYNTHETIC=0` so fixtures cannot satisfy live coverage. Differential replay
+ends after at least 1,000 comparisons per handler and completed live controls,
+or the first race exit or requested pass count. Its timing includes both
+implementations and is not a performance benchmark.
+
+Each course must show both an input shadow and steering/car-position response,
+then actual pause states 1 and 2, thirty paused handler calls with zero velocity
+and unchanged world progress, resume state $E0, and renewed velocity/progress.
+Input polling and audio synthesis must continue during the paused interval.
+Every differential invocation still compares persistent state, ABI outputs,
+control transfers and ordered game/audio callbacks. Every sparse capture still
+checks required bytes and omitted-field preservation.
+
+The script then rebuilds production defaults and records audio over 240 OFFROAD
+passes and 160 passes on each additional course, including the 121–160 window.
+A preliminary SOUTH replay reached race exit after pass 225 and failed the
+240-pass deadline; it is not a successful 240-pass measurement. Fixed 160-pass
+additional-course coverage avoids mixing menu time into race latency. This is
+verification coverage, not a claim of a completed leg or better performance.
+`irq_live_report.py` gates scenario coverage, sequential
+vblank audio counters, dispatch gaps, active PSG voices, nonzero PCM, saturation
+and recording duration. Cadence is measured at synthesis entry and can include
+IRQ scheduling jitter. It does not measure sound-device latency. Input polling
+counts are retained as coverage, not interpreted as a precise sampling rate.
+Recording temporarily enables master volume and unmutes audio, restoring both
+settings before exit; this avoids silent WAV files caused by a saved zero master
+volume. It retains PSG device volume and logs its value.
+
+Full WAV recordings and engine/pause/resume listening clips use the output
+prefix. Numerical audio gates establish signal presence and capture integrity;
+they do not establish sound quality. Physical timing and listening results must
+be reported separately. See [hardware-verification.md](hardware-verification.md)
+for the physical capture protocol and outstanding hardware gate.
+
+### Completed matrix
+
+The saved [verification report](benchmarks/2026-11-17/live-irq/verification.json)
+contains 20,000 matched handler invocations (1,000 per handler per course) and
+31,294 checked sparse snapshots. All five courses passed actual left/right car
+movement and STOP pause/resume transitions. Paused world progress stayed fixed
+for thirty handler calls, about 1.196 seconds, while input and audio continued.
+
+Production synthesis-entry intervals, in milliseconds:
+
+| Course | Race passes | Snapshot checks in differential run | Median | p95 | Worst |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| OFFROAD | 240 | 5,948 | 19.937 | 21.193 | 38.169 |
+| NORTH | 160 | 6,080 | 19.937 | 21.792 | 38.186 |
+| EAST | 160 | 6,293 | 19.937 | 22.829 | 38.179 |
+| WEST | 160 | 6,362 | 19.937 | 21.628 | 38.169 |
+| SOUTH | 160 | 6,611 | 19.938 | 21.646 | 38.405 |
+
+All production recordings contain nonzero PCM, active PSG voices and zero
+saturated samples; duration matches the replay within 50 ms. No sampled audio
+frame-counter steps were missing. Engine, pause and resume clips, state traces,
+cadence/register traces, screenshots and hashes are retained beside the report.
+Listening and physical hardware timing remain pending.
+
+The reporter also rejected ten injected failures: missing pause, reversed right
+movement, progress while paused, stopped paused audio, missing audio dispatch,
+excessive dispatch gap, silent PCM, saturated PCM, shortened PCM and timeout.
+
+These control replays do not establish a performance improvement. The OFFROAD
+run reached 2.981 page flips/s, with game-pass median/p95/worst latency of
+187/1,116/2,220 ms; its late 121–240 window reached only 2.168 game passes/s.
+Other courses also retain multi-second worst game-pass latency. The audio and
+control checks pass while renderer stalls remain. Use the separate paired
+performance gate before accepting further optimization.
