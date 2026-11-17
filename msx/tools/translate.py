@@ -570,8 +570,12 @@ class Gen:
             self.emit('ld hl,$%04X' % v, 'add hl,%s' % ('de' if mode == 'zpx' else 'bc'), 'ld h,0')
             return '(hl)'
         if mode == 'izy':
-            self.emit('ld hl,($%04X)' % v, 'add hl,bc',
-                      'call %s' % ('k_grd_ram' if ramio else 'k_grd'))
+            self.emit('ld hl,($%04X)' % v, 'add hl,bc')
+            if ROAD_DIRECT and a == 0x3607:
+                self.emit('push ix', 'push hl', 'pop ix', 'call k_farcall',
+                          'db SEG_ROAD', 'dw rd_read', 'pop ix')
+            else:
+                self.emit('call %s' % ('k_grd_ram' if ramio else 'k_grd'))
             return 'l'
         if mode == 'abs':
             cls = addr_class(v, ramio)
@@ -670,7 +674,11 @@ class Gen:
             body = ['call ' + helper]
         if reg == 'a':
             self.emit(*setup)
-            self.emit(*body)
+            if ROAD_DIRECT and a == 0x3616:
+                self.emit('push ix', 'push hl', 'pop ix', 'call k_farcall',
+                          'db SEG_ROAD', 'dw rd_write', 'pop ix')
+            else:
+                self.emit(*body)
         else:
             self.emit('push af', 'ld a,%s' % reg)
             self.emit(*setup)
@@ -770,12 +778,10 @@ class Gen:
         self.out.append('%s:\t\t\t; %04X %s %s' % (L(a), a, text, mode))
         if a == 0x3502:  # translated road drawer's final RTS
             self.out.extend(('if MSX2PLUS', '\tcall race_ready', 'endif'))
+        if ROAD_DIRECT and a == 0x3627:
+            self.emit('push hl', 'call k_farcall', 'db SEG_ROAD',
+                      'dw rd_finish', 'pop hl')
         if a == MAIN_LOOP:
-            if ROAD_DIRECT:
-                # Compatibility checkpoint before the next game pass can read
-                # or overlay bitmap data. Direct rendering consumed the spans.
-                self.emit('push hl', 'call k_farcall', 'db SEG_ROAD',
-                          'dw rd_checkpoint', 'pop hl')
             # Pace race passes and render each completed pass. Preserve the
             # translated registers/flags; reset a schedule left behind by menus.
             # An early pass renders before waiting, using that wait for useful work.
@@ -797,6 +803,11 @@ class Gen:
                       # AF/HL are already saved by the hook above.
                       'push bc', 'call read_input', 'pop bc',
                       'pop hl', 'pop af')
+            if ROAD_DIRECT:
+                # Render the completed spans first, then restore canonical
+                # bitmap data before the next game pass or overlay can read it.
+                self.emit('push hl', 'call k_farcall', 'db SEG_ROAD',
+                          'dw rd_checkpoint', 'pop hl')
         if a in self.c2_before:
             self.emit('call k_c2')
         if a == SPEC_RANGE[0] and SPEC_ON:

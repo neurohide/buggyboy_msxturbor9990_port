@@ -42,13 +42,21 @@ rd_seed_read:
 	and l
 	inc a
 	jr nz,rd_seed_mapped
+	call k_get_iff
+	push af
+	di
 	ld a,SEG_VIC
 	out (PORT_P2),a
 	ld a,($BFFF)
-	push af
+	ld (rd_value),a
 	ld a,SEG_C2
 	out (PORT_P2),a
 	pop af
+	or a
+	jr z,rd_seed_di
+	ei
+rd_seed_di:
+	ld a,(rd_value)
 	jr rd_seed_got
 rd_seed_mapped:
 	ld a,(hl)
@@ -153,6 +161,76 @@ rd_put:                         ; IX = mapped VIC address, A = native edge byte
 	push ix
 	pop hl
 	ld (rd_store),a
+	ld a,h
+	or $C0
+	ld h,a
+	call rd_locate
+	ld a,(rd_store)
+	ld (hl),a
+	ld a,1
+	ld (rd_changed),a
+	jp rd_pop
+
+; The existing $35F9 edge cleanup reads and writes road bytes after the
+; specialized drawer. Keep those accesses in the same logical span image.
+; Outside that image (or with spans inactive), retain the ordinary helpers.
+rd_read:
+	push ix
+	pop hl
+	push af
+	call rd_is_span
+	jr nz,rd_read_span
+	pop af
+	jp k_grd
+rd_read_span:
+	pop af
+	push af
+	push bc
+	push de
+	ld a,h
+	or $C0
+	ld h,a
+	call rd_locate
+	ld l,(hl)
+rd_read_done:
+	pop de
+	pop bc
+	pop af
+	ret
+rd_write:
+	push ix
+	pop hl
+	push af
+	call rd_is_span
+	jr nz,rd_write_span
+	pop af
+	jp k_gwrlf
+rd_write_span:
+	pop af
+rd_write_put:
+	jp rd_put
+rd_is_span:
+	ld a,(road_active)
+	or a
+	ret z
+	ld a,h
+	cp $80
+	jr nc,rd_not_span
+	cp $71
+	jr c,rd_not_span
+	jr nz,rd_in_span
+	ld a,l
+	cp $80
+	jr c,rd_not_span
+rd_in_span:
+	ld a,1
+	or a
+	ret
+rd_not_span:
+	xor a
+	ret
+
+rd_locate:                      ; mapped bitmap HL -> scratch byte HL
 	ld bc,$0E80
 	add hl,bc
 	ld d,0
@@ -220,11 +298,7 @@ rd_put_byte:
 	jr nc,rd_put_ptr
 	inc h
 rd_put_ptr:
-	ld a,(rd_store)
-	ld (hl),a
-	ld a,1
-	ld (rd_changed),a
-	jp rd_pop
+	ret
 
 rd_finish:                      ; publish the final scratch line before rendering
 	push af
@@ -280,12 +354,19 @@ rd_mat_byte:
 	ld a,e
 	cp $FF
 	jr nz,rd_mat_write
+	call k_get_iff
+	push af
+	di
 	ld a,SEG_VIC
 	out (PORT_P2),a
 	ld a,(rd_value)
 	ld ($BFFF),a
 	ld a,SEG_C2
 	out (PORT_P2),a
+	pop af
+	or a
+	jr z,rd_mat_skip
+	ei
 	jr rd_mat_skip
 rd_mat_write:
 	ld a,(rd_value)

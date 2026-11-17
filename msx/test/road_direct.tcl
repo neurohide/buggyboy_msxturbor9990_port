@@ -5,6 +5,10 @@ namespace eval road_check {
  variable phase 0
  variable count 0
  variable returns {}
+ variable pixel_rows 0
+ variable pending {}
+ variable general 0
+ variable assumptions {}
  variable ram {1MB External RAM}
  variable regions {{0x4e 3} {0x55 1} {0xfb 2} {0x4d8 576} {0x3002 1} {0x3503 1}}
 }
@@ -22,14 +26,19 @@ proc road_check::restore {memory registers} {
   debug write ioports $port [debug read $ram [expr {0x10000+$address}]]
  }
 }
-proc road_check::enter {} {
+proc road_check::enter {{kind edge}} {
  variable phase; variable ram; variable pre; variable regs; variable sp; variable returns; variable iff
+ variable operation; variable prelogical
  if {$phase || !$::begun} return
- if {[debug read memory 0x2fe1]} {fail {previous span transaction was not checkpointed}}
+ set active [debug read memory 0x2fe1]
+ if {$kind eq "cleanup" && !$active} return
+ if {$kind eq "edge" && $active} {fail {previous span transaction was not checkpointed}}
+ set operation $kind
  set iff [reg iff]
  reg iff 0
  set regs [registers]
  set pre [debug read_block $ram 0x10000 0x20000]
+ if {$kind eq "cleanup"} {set prelogical [logical $pre]}
  set sp [reg sp]
  set ret [expr {[debug read memory $sp] | [debug read memory [expr {$sp+1}]]<<8}]
  if {$ret ni $returns} {
@@ -37,6 +46,7 @@ proc road_check::enter {} {
   debug set_bp $ret {$road_check::phase && [reg sp] == $road_check::sp+2} road_check::leave
  }
  set phase 1
+ if {$kind eq "edge"} {arm_access_guard}
 }
 proc road_check::logical {memory} {
  variable ram
@@ -63,18 +73,28 @@ proc road_check::logical {memory} {
 proc road_check::leave {} {
  variable phase; variable ram; variable pre; variable regs; variable post; variable post_regs
  variable expected; variable count; variable regions; variable iff
+ variable operation; variable prelogical
  if {$phase == 1} {
   set post [debug read_block $ram 0x10000 0x20000]
   set post_regs [registers]
   if {[string range $pre 0x6000 0x7fff] ne [string range $post 0x6000 0x7fff]} {
    fail {specialized drawer wrote the VIC bitmap}
   }
-  set expected [logical $post]
+  set result [logical $post]
+  if {$operation eq "cleanup" && $expected ne $result} {
+   fail "cleanup span publication differs from observed reads/writes changed=[debug read memory [dict get $::road_labels rd_changed]] cached=[debug read memory [dict get $::road_labels rd_cached]]"
+  }
+  set expected $result
   restore $pre $regs
-  set segment [dict get $::road_labels general_segment]
-  debug write memory 0x2f60 $segment
-  debug write ioports 253 $segment
-  reg pc [dict get $::road_labels T_289C_g]
+  if {$operation eq "cleanup"} {
+   debug write_block $ram 0x14000 $prelogical
+   debug write memory 0x2fe1 0
+  } else {
+   set segment [dict get $::road_labels general_segment]
+   debug write memory 0x2f60 $segment
+   debug write ioports 253 $segment
+   reg pc [dict get $::road_labels T_289C_g]
+  }
   set phase 2
   return
  }
@@ -83,7 +103,7 @@ proc road_check::leave {} {
  if {$bitmap ne $expected} {
   binary scan $bitmap cu* a; binary scan $expected cu* b
   for {set i 0} {$i < 16384} {incr i} {
-   if {[lindex $a $i] != [lindex $b $i]} {fail [format {bitmap $%04X native %02X reference %02X pair %d} [expr {$i+0x4000}] [lindex $b $i] [lindex $a $i] $count]}
+   if {[lindex $a $i] != [lindex $b $i]} {fail [format {bitmap $%04X native %02X reference %02X pair %d operation %s reads %s writes %s} [expr {$i+0x4000}] [lindex $b $i] [lindex $a $i] $count $operation $::road_check::reads $::road_check::writes]}
   }
  }
  foreach region $regions {
@@ -100,9 +120,121 @@ proc road_check::leave {} {
  if {$count % 20 == 0} {puts stderr "Road spans: $count matched transactions"}
 }
 proc road_check::summary {args} {
- variable count; variable phase
- if {!$count || $phase} {fail {no completed differential coverage}}
- puts stderr "Road spans verification passed: $count transactions, bitmap and collision inputs match"
+ variable count; variable phase; variable pixel_rows; variable pending
+ if {!$count || $phase || !$pixel_rows || [llength $pending]} {fail "incomplete coverage transactions=$count phase=$phase pixel_rows=$pixel_rows pending=[llength $pending] reads=$::road_check::reads writes=$::road_check::writes general=$::road_check::general flags=$::road_check::assumptions"}
+ puts stderr "Road spans verification passed: $count transactions, $pixel_rows V9990 rows, bitmap and collision inputs match"
 }
-debug set_bp [dict get $::road_labels road_entry] {[debug read memory 0x2f60] == [dict get $::road_labels road_segment]} road_check::enter
+proc road_check::general_enter {} {
+ if {$::road_check::phase || !$::begun} return
+ incr ::road_check::general
+ set ::road_check::assumptions {}
+ foreach a {0x0342 0x02bc 0x02b9 0x2fe0 0x0334 0x96e4 0x02ca} {
+  lappend ::road_check::assumptions [debug read memory $a]
+ }
+}
+proc road_check::word {label} {
+ set a [dict get $::road_labels $label]
+ return [expr {[debug read memory $a] | [debug read memory [expr {$a+1}]]<<8}]
+}
+proc road_check::pixels_begin {} {
+ variable pending; variable ram; variable expected
+ if {![info exists expected]} return
+ if {[llength $pending]} {fail {previous V9990 row was not checked}}
+ set row [debug read memory [dict get $::road_labels cur_row]]
+ set x [expr {[dict get $::road_labels SCREEN_X]+[debug read memory [dict get $::road_labels row_xoff]]}]
+ set y [expr {[dict get $::road_labels CLEAN_Y]+[dict get $::road_labels SCREEN_Y]+8*$row}]
+ binary scan $expected cu* bitmap
+ binary scan [debug read_block $ram [expr {0x14000+([word row_scr]&0x3fff)}] 40] cu* screen
+ binary scan [debug read_block memory [word row_cram] 40] cu* cram
+ set palettes {}
+ for {set col 0} {$col < 40} {incr col} {
+  set palette {0}
+  foreach color [list [expr {[lindex $screen $col]>>4}] [expr {[lindex $screen $col]&15}] [expr {[lindex $cram $col]&15}]] {
+   set folded [debug read memory [expr {[dict get $::road_labels col_fold]+$color}]]
+   set slot [debug read memory [expr {[dict get $::road_labels slot_of]+$folded}]]
+   if {!$slot} {set slot [dict get $::road_labels PAL_FIXED]}
+   lappend palette $slot
+  }
+  lappend palettes $palette
+ }
+ set rows {}
+ for {set line 0} {$line < 8} {incr line} {
+  set pixels {}
+  for {set col 0} {$col < 40} {incr col} {
+   set palette [lindex $palettes $col]
+   set byte [lindex $bitmap [expr {0x2000+$row*320+$col*8+$line}]]
+   foreach shift {6 4 2 0} {
+    set color [lindex $palette [expr {($byte>>$shift)&3}]]
+    lappend pixels $color $color $color
+   }
+  }
+  lappend rows $pixels
+ }
+ set pending [list $x $y $rows]
+}
+proc road_check::pixels_finish {} {
+ variable pending; variable pixel_rows
+ if {![llength $pending]} return
+ lassign $pending x y rows
+ set line 0
+ foreach pixels $rows {
+  binary scan [debug read_block {Sunrise GFX9000 VRAM} [expr {($y+$line)*256}] 256] cu* raw
+  set p $x
+  foreach want $pixels {
+   set byte [lindex $raw [expr {$p/2}]]
+   set got [expr {($byte >> (($p&1)?0:4))&15}]
+   if {$got != $want} {fail "V9990 pixel x=$p y=[expr {$y+$line}] actual=$got expected=$want pass=$::n"}
+   incr p
+  }
+  incr line
+ }
+ set pending {}
+ incr pixel_rows
+}
+proc road_check::bitmap_access {} {
+ set stack {}
+ for {set a [reg sp]} {$a < [reg sp]+12} {incr a 2} {
+  lappend stack [format %04X [expr {[debug read memory $a] | [debug read memory [expr {$a+1}]]<<8}]]
+ }
+ fail [format {bitmap access before checkpoint PC=$%04X HL=$%04X bank=%d pass=%d stack=%s} [reg pc] [reg hl] [debug read memory 0x2f60] $::n $stack]
+}
+proc road_check::arm_access_guard {} {
+ if {[info exists ::road_check::guards]} return
+ set ::road_check::guards {}
+ foreach type {read_mem write_mem} {
+  lappend ::road_check::guards [debug set_watchpoint $type {0xf180 0xffff} {[debug read memory 0x2fe1] && [debug read memory 0x2fb7] == 5 && [debug read memory 0x2f60] != 14} road_check::bitmap_access]
+  lappend ::road_check::guards [debug set_watchpoint $type {0xb180 0xbfff} {[debug read memory 0x2fe1] && [debug read memory 0x2f61] == 5 && [debug read memory 0x2f60] != 14} road_check::bitmap_access]
+ }
+}
+proc road_check::disarm_access_guard {} {
+ if {![info exists ::road_check::guards]} return
+ foreach guard $::road_check::guards {debug remove_watchpoint $guard}
+ unset ::road_check::guards
+}
+proc road_check::cleanup_read {} {
+ variable expected
+ incr ::road_check::reads
+ set address [expr {[reg ix]&0x3fff}]
+ binary scan [string index $expected $address] cu want
+ set got [expr {[reg hl]&255}]
+ if {$got != $want} {fail [format {cleanup read $%04X actual %02X expected %02X} [reg ix] $got $want]}
+}
+proc road_check::cleanup_write {} {
+ variable expected
+ incr ::road_check::writes
+ set address [expr {[reg ix]&0x3fff}]
+ set expected [string replace $expected $address $address [binary format c [expr {[reg af]>>8}]]]
+}
+set road_check::reads 0
+set road_check::writes 0
+# Audio temporarily maps the renderer without changing cur_p1. Check the
+# actual mapper port too, or an audio PC alias can impersonate a game entry.
+debug set_bp [dict get $::road_labels road_entry] {[debug read memory 0x2f60] == [dict get $::road_labels road_segment] && ([debug read ioports 253]&15) == [dict get $::road_labels road_segment]} road_check::enter
+debug set_bp [dict get $::road_labels T_289C] {[debug read memory 0x2f60] == [dict get $::road_labels general_segment] && ([debug read ioports 253]&15) == [dict get $::road_labels general_segment]} road_check::general_enter
+debug set_bp [dict get $::road_labels cleanup_entry] {[debug read memory 0x2f60] == [dict get $::road_labels cleanup_segment] && ([debug read ioports 253]&15) == [dict get $::road_labels cleanup_segment]} {road_check::enter cleanup}
+debug set_bp [dict get $::road_labels rd_read_done] {$road_check::phase == 1 && $road_check::operation eq "cleanup" && [debug read memory 0x2f60] == 14} road_check::cleanup_read
+debug set_bp [dict get $::road_labels rd_write_put] {$road_check::phase == 1 && $road_check::operation eq "cleanup" && [debug read memory 0x2f60] == 14} road_check::cleanup_write
+debug set_bp [dict get $::road_labels rdv_border] {[debug read memory 0x2f61] == 14} road_check::pixels_begin
+debug set_bp [dict get $::road_labels v_wait_done] {$road_check::pending ne {} && [debug read memory 0x2f60] == 12} road_check::pixels_finish
+debug set_bp [dict get $::road_labels rd_checkpoint] {([debug read ioports 253]&15) == 14} road_check::disarm_access_guard
 trace add execution finish enter road_check::summary

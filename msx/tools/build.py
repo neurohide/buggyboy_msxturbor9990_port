@@ -71,6 +71,8 @@ def build_lookup(mem, lab, nseg):
 
 
 def main():
+    if os.environ.get('ROAD_DIRECT', '0') == '1' and os.environ.get('ROAD_NATIVE', '1') != '1':
+        sys.exit('ROAD_DIRECT requires ROAD_NATIVE=1')
     os.makedirs(BUILD, exist_ok=True)
     msx2plus = os.environ.get('MSX2PLUS', '1').lower() in ('1', 'true', 'yes', 'on')
     with open(os.path.join(BUILD, 'config.inc'), 'w') as f:
@@ -94,8 +96,6 @@ def main():
         if r.returncode:
             sys.exit('assembly failed')
     lab = labels(lblf)
-    if lab['ROAD_DIRECT'] and os.environ.get('ROAD_NATIVE', '1') != '1':
-        sys.exit('ROAD_DIRECT requires ROAD_NATIVE=1')
     if lab['IRQ_SNAPSHOT'] and (lab['TL_REC'] != 64 or lab['VIC_REGS'] & 255 or
                                any(lab[k] & 255 for k in ('TL_BASE', 'TIMELINE', 'TIMELINE1'))):
         sys.exit('Sparse IRQ snapshots require page-aligned tables and 64-byte records')
