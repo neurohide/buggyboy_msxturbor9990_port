@@ -159,7 +159,7 @@ def main():
     for i in range(nseg):
         banks.append(chunks['seg%d' % i][1])
     if lab['ROAD_DIRECT']:
-        banks += [bytes(0x4000), chunks['road_cpu'][1] + chunks['road_vdp'][1] + bytes(0x2000)]
+        banks += [b'\xFF' * 0x4000, chunks['road_cpu'][1] + chunks['road_vdp'][1] + bytes(0x2000)]
     for b in banks:
         assert len(b) == 0x4000, len(b)
     if len(banks) > INTRO_BANK:

@@ -122,6 +122,14 @@ rr_road_check:
 	ld a,(road_active)
 	or a
 	jr z,rr_bitmap
+	ld a,(row_mode)
+	bit 1,a                    ; text overlays do not consume road bitmap data
+	jr nz,rr_road_bitmap
+	ld a,(row_bmoff+1)         ; character bases $3000/$3800 overlap deferred bytes
+	cp $30
+	jr c,rr_bitmap
+	jr rr_road_fallback
+rr_road_bitmap:
 	ld a,SEG_ROAD
 	ld (cur_p2),a
 	out (PORT_P2),a
@@ -130,6 +138,7 @@ rr_road_check:
 	call k_map_vic
 	pop af
 	jr z,rr_sync
+rr_road_fallback:
 	; An unexpected display mode needs the canonical bitmap before using
 	; the general renderer. The far-call epilogue needs C2 in page 2.
 	call k_map_c2
@@ -164,7 +173,11 @@ rr_next:
 	ld a,(cur_row)
 	inc a
 	cp 25
+	if ROAD_DIRECT
+	jp nz,rr_loop
+	else
 	jr nz,rr_loop
+	endif
 	call render_sprites
 	call screen_change
 

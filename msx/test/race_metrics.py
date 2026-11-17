@@ -88,7 +88,9 @@ def summarize(prefix):
         if subset:
             result['windows'][f'{start}-{end}'] = window(subset)
     complete = 'status=complete' in Path(prefix + '_result.txt').read_text()
-    result['measurement_valid'] = complete and len(data) >= 240 and progress_valid and bool(total_steps) and steering_ok and (
+    log = Path(prefix + '.log')
+    result['profiler_valid'] = log.exists() and 'warning: Nested renderer' not in log.read_text()
+    result['measurement_valid'] = result['profiler_valid'] and complete and len(data) >= 240 and progress_valid and bool(total_steps) and steering_ok and (
         scenario != 'collision' or recovered)
     return result
 
@@ -102,6 +104,9 @@ def gate(candidate, baseline):
             reasons.append(f'{name}: incomplete window, progress, or scenario evidence')
     for key in ('scenario', 'config', 'passes', 'profile', 'validation', 'metrics'):
         if candidate['metadata'][key] != baseline['metadata'][key]:
+            reasons.append(f'Unmatched metadata: {key}')
+    for key in ('input_protocol', 'acceleration', 'steering', 'live_controls', 'differential'):
+        if candidate['metadata'].get(key) != baseline['metadata'].get(key):
             reasons.append(f'Unmatched metadata: {key}')
     if candidate['long']['passes_per_second'] < baseline['long']['passes_per_second']:
         reasons.append('Long-window throughput regressed')

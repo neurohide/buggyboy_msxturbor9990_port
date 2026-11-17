@@ -29,6 +29,7 @@ Path(out+'_metadata.json').write_text(json.dumps({
     'rom_sha256': hashlib.sha256(Path('build/buggyboy.rom').read_bytes()).hexdigest(),
     'config': Path('build/config.inc').read_text().strip(),
     'passes': passes, 'course': course, 'acceleration': True,
+    'input_protocol': 'up-at-course-confirmation-single-launch-fire-v1',
     'steering': scenario != 'straight' or 'IRQ_LIVE_OUT' in os.environ,
     'live_controls': 'IRQ_LIVE_OUT' in os.environ,
     'differential': os.environ.get('IRQ_DIFFERENTIAL') == '1',
@@ -45,6 +46,7 @@ set ::flips 0
 set ::begun 0
 set ::course_selecting 0
 set ::course_ready 0
+set ::course_launched 0
 set ::bb_samples [open "OUT_pc.samples" w]
 set ::roadlog [open "OUT_road.csv" w]
 puts $::roadlog {pass,time,0342,02bc,02b9,fb2a,0334,96e4,02ca}
@@ -54,17 +56,21 @@ set ::log [open "OUT_frames.csv" w]
 puts $::log {pass,time,seconds,flips}
 proc release_fire {} {keymatrixup 8 0x01}
 proc menu_input {} {
- if {$::begun} {return}
+ if {$::begun || $::course_launched} {return}
  if {$::course_selecting && !$::course_ready} {after time 1 menu_input; return}
  keymatrixdown 8 0x01
+ if {$::course_selecting && $::course_ready} {set ::course_launched 1}
  after time 0.5 release_fire
  after time 1 menu_input
 }
 after time 7 menu_input
-debug set_bp COURSEENTRY {[debug read memory 0x2F60] == COURSESEG && !$::begun} {
+debug set_bp COURSEENTRY {[debug read memory 0x2F60] == COURSESEG && !$::begun && [debug read_block memory COURSEENTRY 4] eq [binary format H* COURSESIG]} {
  set ::course_selecting 1
  set ::course_ready [expr {[debug read memory 0x033A] == COURSE}]
- if {$::course_ready} {keymatrixup 8 0x40} else {
+ if {$::course_ready} {
+  keymatrixup 8 0xD0
+  keymatrixdown 8 0x20
+ } else {
   keymatrixup 8 0x01
   keymatrixdown 8 0x40
  }
@@ -130,7 +136,7 @@ proc race_pass {} {
  if {$::n==1} {screenshot "OUT_start.png"}
  if {$::n>=PASSES} {finish complete}
 }
-debug set_bp ADDR {[debug read memory 0x2F60] == SEG} race_pass
+debug set_bp ADDR {[debug read memory 0x2F60] == SEG && [debug read_block memory ADDR 4] eq [binary format H* PASSSIG]} race_pass
 debug set_bp FLIP {[debug read memory 0x2F61] == 6 && $::begun} {
  incr ::flips
  set now [machine_info time]
@@ -155,6 +161,7 @@ if {[info exists ::env(IRQ_AB_SCRIPT)]} {
 }
 if {[info exists ::env(RACE_METRICS)] && $::env(RACE_METRICS)==1} {
  set ::race_metrics_labels {METRICLABELS}
+ set ::race_metrics_signatures {METRICSIGS}
  set ::race_metrics_recovery {RECOVERY}
  set ::race_metrics_contacts {METRICCONTACTS}
  set ::race_metrics_out "OUT"
@@ -176,10 +183,25 @@ replacements['DIFFERENTIAL']='1' if os.environ.get('IRQ_DIFFERENTIAL') == '1' el
 recovery=next((s,a) for s,v in tables.items() if isinstance(s,int) for a,n in v if n=='T_B7C9')
 course_seg,course_addr=next((s,a) for s,v in tables.items() if isinstance(s,int) for a,n in v if n=='T_0B5E')
 replacements.update(COURSE=str(course), COURSEENTRY=hex(course_addr), COURSESEG=str(course_seg))
+# Sound maps the renderer without updating cur_p1. Check mapped code as well
+# as the software bank variable so relocated sound PCs cannot act as game hooks.
+rom=Path('build/buggyboy.rom').read_bytes()
+def signature(segment, address):
+    offset=(segment-2)*0x4000+(address&0x3fff)
+    return rom[offset:offset+4].hex()
+replacements.update(COURSESIG=signature(course_seg,course_addr), PASSSIG=signature(seg,addr))
 replacements['RECOVERY']='%d %d' % recovery
 contacts={'T_1D64','T_BD2A','T_1925','T_19D0','T_1C54','T_980C'}
 replacements['METRICCONTACTS']=' '.join('{%d %d %s}' % (s,a,n)
     for s,v in tables.items() if isinstance(s,int) for a,n in v if n in contacts)
+metric_sites=[(12,labels[n]) for n in ('render_frame','dr_cell','v_send_cmd','dr_next','dt_op','tlb_copy','tlb_cp')]
+metric_sites += [(6,labels['tl_fill']), recovery]
+metric_sites += [(s,a) for s,v in tables.items() if isinstance(s,int) for a,n in v if n in contacts]
+def metric_signature(segment, address):
+    bank={4:1, 5:2, 6:3, 7:4, 12:5}.get(segment, segment-2)
+    offset=bank*0x4000+(address&0x3fff)
+    return rom[offset:offset+8].hex()
+replacements['METRICSIGS']=' '.join(f'{s}_{a} '+metric_signature(s,a) for s,a in metric_sites)
 s=re.sub(r"(?<![A-Z])(?:"+"|".join(map(re.escape,replacements))+r")(?![A-Z])",
          lambda m: replacements[m[0]],s)
 Path(out+'.tcl').write_text(s)

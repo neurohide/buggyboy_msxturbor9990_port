@@ -45,7 +45,11 @@ proc race_metrics::account {} {
 }
 proc race_metrics::label {name} {variable labels; dict get $labels $name}
 proc race_metrics::bp {name page segment action} {
- debug set_bp [label $name] "\[debug read memory $page\] == $segment" $action
+ mapped_bp [label $name] $page $segment $action
+}
+proc race_metrics::mapped_bp {address page segment action} {
+ set signature [dict get $::race_metrics_signatures ${segment}_$address]
+ debug set_bp $address "\[debug read memory $page\] == $segment && \[debug read_block memory $address 8\] eq \[binary format H* $signature\]" $action
 }
 # Return breakpoints include RET/RETI execution. SP distinguishes recursive IRQs.
 proc race_metrics::on_return {action} {
@@ -223,10 +227,10 @@ race_metrics::bp tl_fill 0x2f61 6 race_metrics::capture
 race_metrics::bp tlb_copy 0x2f60 12 race_metrics::local_copy
 race_metrics::bp tlb_cp 0x2f60 12 race_metrics::local_copy
 lassign $::race_metrics_recovery recovery_segment recovery_address
-debug set_bp $recovery_address "\[debug read memory 0x2f60\] == $recovery_segment" race_metrics::recovery
+race_metrics::mapped_bp $recovery_address 0x2f60 $recovery_segment race_metrics::recovery
 foreach contact $::race_metrics_contacts {
  lassign $contact segment address site
- debug set_bp $address "\[debug read memory 0x2f60\] == $segment" [list race_metrics::contact $site]
+ race_metrics::mapped_bp $address 0x2f60 $segment [list race_metrics::contact $site]
 }
 trace add execution race_pass enter race_metrics::boundary
 trace add execution race_pass leave race_metrics::inputs

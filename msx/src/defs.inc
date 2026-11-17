@@ -19,6 +19,7 @@ SEG_SHADOW:      equ 13              ; renderer: last drawn cell inputs (mapped 
 SEG_ROAD:        equ 14              ; optional road span producer and V9990 consumer
 road_active:    equ $2FE1           ; span records own the road bitmap until checkpoint
 road_repair:    equ $2FE2           ; bitmap materialized: invalidate renderer road rows
+road_busy:      equ $2FE3           ; producer/checkpoint owns unpublished span records
 
 ; ---- V9990 (Gfx9000) --------------------------------------------------------
 V_VRAM:          equ $60             ; P#0 VRAM data

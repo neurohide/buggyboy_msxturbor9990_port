@@ -1,8 +1,6 @@
-; Optional native road store target. Records are (exclusive column end, byte)
-; runs, one 80-byte record per scanline from y=112 through bitmap padding.
-; Only a transient 40-byte line is expanded. The VIC bitmap is not written by
-; the specialized drawer. Checkpoint restores it before another game pass or
-; the general overlay drawer. Public entries preserve AF/BC/DE/HL.
+; Native edges write a line-major byte plane instead of the canonical VIC
+; bitmap. Encode each line once at publication, never once per changed byte.
+; Public entries preserve AF/BC/DE/HL; rd_read returns its byte in L.
 	org $4000
 road_cpu_start:
 rd_begin:
@@ -10,33 +8,17 @@ rd_begin:
 	push bc
 	push de
 	push hl
+	ld a,1
+	ld (road_busy),a
 	call rd_checkpoint_body
 	call k_vic_on
 	ld hl,$F180
-	ld de,$6000
+	ld de,rd_plane
 	ld b,96
 rd_seed:
 	push bc
 	push hl
-	push de
-	ld de,rd_linebuf
-	push hl
-	ld hl,rd_linebuf
-	ld (hl),0
-	push de
-	ld de,rd_linebuf+1
-	ld bc,39
-	ldir
-	pop de
-	pop hl
-	ld b,40
-	ld a,h
-	cp $FF
-	jr c,rd_seed_read
-	ld a,l
-	cp $40
-	jr c,rd_seed_read
-	ld b,24                    ; last bitmap cell row is only 24 columns
+	call rd_columns
 rd_seed_read:
 	ld a,h
 	and l
@@ -70,14 +52,16 @@ rd_seed_got:
 	inc h
 rd_seed_next:
 	djnz rd_seed_read
-	pop de
-	push de
-	call rd_encode
-	pop de
-	ex de,hl
-	ld bc,80
-	add hl,bc
-	ex de,hl
+	ld a,c
+	or a
+	jr z,rd_seed_end
+	xor a
+	ld b,c
+rd_seed_pad:
+	ld (de),a
+	inc de
+	djnz rd_seed_pad
+rd_seed_end:
 	pop hl
 	inc hl
 	ld a,l
@@ -88,18 +72,43 @@ rd_seed_next:
 rd_seed_base:
 	pop bc
 	djnz rd_seed
-	ld a,$FF
-	ld (rd_cached),a
-	xor a
-	ld (rd_changed),a
-	inc a
+	ld a,1
 	ld (road_active),a
 	jp rd_pop
+
+; HL = canonical line base. B = columns, C = plane-only padding columns.
+rd_columns:
+	ld bc,40*256
+	ld a,h
+	cp $FF
+	ret c
+	ld a,l
+	cp $40
+	ret c
+	ld bc,24*256+16
+	ret
+
+rd_encode_all:
+	ld hl,rd_plane
+	ld de,$6000
+	ld b,96
+rd_encode_line:
+	push bc
+	push de
+	call rd_encode
+	pop de
+	push hl
+	ld hl,80
+	add hl,de
+	ex de,hl
+	pop hl
+	pop bc
+	djnz rd_encode_line
+	ret
 
 ; Encode exactly 40 columns. Padding columns beyond the bitmap are never
 ; consumed or materialized; seed them deterministically on the short last row.
 rd_encode:
-	ld hl,rd_linebuf
 	ld c,0
 rd_enc_run:
 	ld a,(hl)
@@ -125,50 +134,22 @@ rd_enc_out:
 	jr nz,rd_enc_run
 	ret
 
-rd_record:                      ; A = line index -> DE = its RLE record
-	ld l,a
-	ld h,0
-	add hl,hl
-	add hl,hl
-	add hl,hl
-	add hl,hl                   ; *16
-	ld d,h
-	ld e,l
-	add hl,hl
-	add hl,hl
-	add hl,de                   ; *80
-	ld de,$6000
-	add hl,de
-	ex de,hl
-	ret
-
-rd_flush:
-	ld a,(rd_changed)
-	or a
-	ret z
-	ld a,(rd_cached)
-	call rd_record
-	call rd_encode
-	xor a
-	ld (rd_changed),a
-	ret
-
 rd_put:                         ; IX = mapped VIC address, A = native edge byte
 	push af
 	push bc
 	push de
 	push hl
+	ld (rd_store),a
+	ld a,1
+	ld (road_busy),a
 	push ix
 	pop hl
-	ld (rd_store),a
 	ld a,h
 	or $C0
 	ld h,a
 	call rd_locate
 	ld a,(rd_store)
 	ld (hl),a
-	ld a,1
-	ld (rd_changed),a
 	jp rd_pop
 
 ; The existing $35F9 edge cleanup reads and writes road bytes after the
@@ -187,6 +168,8 @@ rd_read_span:
 	push af
 	push bc
 	push de
+	ld a,1
+	ld (road_busy),a
 	ld a,h
 	or $C0
 	ld h,a
@@ -230,82 +213,55 @@ rd_not_span:
 	xor a
 	ret
 
-rd_locate:                      ; mapped bitmap HL -> scratch byte HL
+; offset=q*64+r -> (q/5)*320+(q%5)*8+(r&7)*40+(r>>3).
+; Two small word tables replace division and repeated line decoding.
+rd_locate:
 	ld bc,$0E80
 	add hl,bc
-	ld d,0
-	ld bc,-320
-rd_address:
-	push hl
-	add hl,bc
-	jr nc,rd_address_done
-	pop bc
-	inc d
-	ld bc,-320
-	jr rd_address
-rd_address_done:
-	pop hl
 	ld a,l
-	and 7
+	and 63
+	add a,a
 	ld e,a
-	ld a,d
-	add a,a
-	add a,a
-	add a,a
-	add a,e
-	ld (rd_target),a
-	srl h
-	rr l
-	srl h
-	rr l
-	srl h
-	rr l
-	ld a,l
-	ld (rd_column),a
-	ld a,(rd_target)
-	ld hl,rd_cached
-	cp (hl)
-	jr z,rd_put_byte
-	call rd_flush
-	ld a,(rd_target)
-	ld (rd_cached),a
-	call rd_record
-	ld hl,rd_linebuf
-	ld c,0
-rd_decode:
-	ld a,(de)
-	ld b,a
-	inc de
-	ld a,(de)
-	ld (rd_value),a
-	inc de
-rd_decode_run:
-	ld (hl),a
+	ld d,0
+	push hl
+	ld hl,rd_tails
+	add hl,de
+	ld e,(hl)
 	inc hl
-	inc c
-	ld a,c
-	cp b
-	ld a,(rd_value)
-	jr c,rd_decode_run
-	ld a,c
-	cp 40
-	jr c,rd_decode
-rd_put_byte:
-	ld a,(rd_column)
-	ld hl,rd_linebuf
-	add a,l
-	ld l,a
-	jr nc,rd_put_ptr
-	inc h
-rd_put_ptr:
+	ld d,(hl)
+	pop hl
+	push de
+	ld a,l
+	rlca
+	rlca
+	and 3
+	ld e,a
+	ld a,h
+	add a,a
+	add a,a
+	or e
+	add a,a
+	ld e,a
+	ld d,0
+	ld hl,rd_chunks
+	add hl,de
+	ld e,(hl)
+	inc hl
+	ld d,(hl)
+	pop hl
+	add hl,de
+	ld de,rd_plane
+	add hl,de
 	ret
 
-rd_finish:                      ; publish the final scratch line before rendering
+rd_finish:                      ; publish complete span records before rendering
 	push af
 	push bc
 	push de
 	push hl
-	call rd_flush
+	call rd_encode_all
+	xor a
+	ld (road_busy),a
 	jp rd_pop
 
 rd_checkpoint:
@@ -313,7 +269,13 @@ rd_checkpoint:
 	push bc
 	push de
 	push hl
+	ld a,(road_busy)
+	push af
+	ld a,1
+	ld (road_busy),a
 	call rd_checkpoint_body
+	pop af
+	ld (road_busy),a
 rd_pop:
 	pop hl
 	pop de
@@ -325,41 +287,31 @@ rd_checkpoint_body:
 	ld a,(road_active)
 	or a
 	ret z
-	call rd_flush
 	ld a,(cur_p3)
 	push af
 	call k_vic_on
-	ld hl,$6000
+	ld hl,rd_plane
 	ld de,$F180
 	ld b,96
 rd_materialize:
 	push bc
 	push de
 	push hl
-	ld c,0
-rd_mat_run:
-	ld b,(hl)
-	inc hl
-	ld a,(hl)
-	ld (rd_value),a
-	inc hl
+	ex de,hl
+	call rd_columns
+	ex de,hl
+	pop hl
 rd_mat_byte:
 	ld a,d
-	cp $FF
-	jr c,rd_mat_write
-	ld a,e
-	and $F8
-	cp $F8
-	jr nz,rd_mat_write
-	ld a,e
-	cp $FF
+	and e
+	inc a
 	jr nz,rd_mat_write
 	call k_get_iff
 	push af
 	di
 	ld a,SEG_VIC
 	out (PORT_P2),a
-	ld a,(rd_value)
+	ld a,(hl)
 	ld ($BFFF),a
 	ld a,SEG_C2
 	out (PORT_P2),a
@@ -369,27 +321,18 @@ rd_mat_byte:
 	ei
 	jr rd_mat_skip
 rd_mat_write:
-	ld a,(rd_value)
+	ld a,(hl)
 	ld (de),a
 rd_mat_skip:
-	push hl
-	ld hl,8
-	add hl,de
-	ex de,hl
-	pop hl
-	inc c
-	ld a,d
-	or a
-	jr z,rd_mat_line_done      ; byte after $FFFF wraps: end of bitmap
-	ld a,c
-	cp b
-	jr c,rd_mat_byte
-	ld a,c
-	cp 40
-	jr c,rd_mat_run
-rd_mat_line_done:
-	pop hl
-	ld bc,80
+	inc hl
+	ld a,e
+	add a,8
+	ld e,a
+	jr nc,rd_mat_next
+	inc d
+rd_mat_next:
+	djnz rd_mat_byte
+	ld b,0
 	add hl,bc
 	pop de
 	inc de
@@ -419,12 +362,82 @@ rd_mat_dirty:
 	djnz rd_mat_dirty
 	ret
 
-rd_cached: db $FF
-rd_changed: db 0
-rd_target: db 0
-rd_column: db 0
 rd_store: db 0
 rd_value: db 0
-rd_linebuf: ds 40
+rd_chunks:
+	dw $0000,$0008,$0010,$0018,$0020,$0140,$0148,$0150
+	dw $0158,$0160,$0280,$0288,$0290,$0298,$02A0,$03C0
+	dw $03C8,$03D0,$03D8,$03E0,$0500,$0508,$0510,$0518
+	dw $0520,$0640,$0648,$0650,$0658,$0660,$0780,$0788
+	dw $0790,$0798,$07A0,$08C0,$08C8,$08D0,$08D8,$08E0
+	dw $0A00,$0A08,$0A10,$0A18,$0A20,$0B40,$0B48,$0B50
+	dw $0B58,$0B60,$0C80,$0C88,$0C90,$0C98,$0CA0,$0DC0
+	dw $0DC8,$0DD0
+rd_tails:
+	dw $0000,$0028,$0050,$0078,$00A0,$00C8,$00F0,$0118
+	dw $0001,$0029,$0051,$0079,$00A1,$00C9,$00F1,$0119
+	dw $0002,$002A,$0052,$007A,$00A2,$00CA,$00F2,$011A
+	dw $0003,$002B,$0053,$007B,$00A3,$00CB,$00F3,$011B
+	dw $0004,$002C,$0054,$007C,$00A4,$00CC,$00F4,$011C
+	dw $0005,$002D,$0055,$007D,$00A5,$00CD,$00F5,$011D
+	dw $0006,$002E,$0056,$007E,$00A6,$00CE,$00F6,$011E
+	dw $0007,$002F,$0057,$007F,$00A7,$00CF,$00F7,$011F
+; 3840 bytes across CPU padding and the consumer's initial padding.
+rd_plane: equ $4800
+	defs $4700-$,0
+	org $C700
+; P3 alias of the producer bank: called with the native address in HL.
+; Only shadow BC/DE/HL and AF are scratch; no per-store farcall needed.
+rd_hot_put:
+	ld (rd_hot_value),a
+	ld a,h
+	or $C0
+	ld h,a
+	call rd_hot_locate
+	ld a,(rd_hot_value)
+	ld (hl),a
+	ret
+rd_hot_locate:
+	ld bc,$0E80
+	add hl,bc
+	ld a,l
+	and 63
+	add a,a
+	ld e,a
+	ld d,0
+	push hl
+	ld hl,rd_tails+$8000
+	add hl,de
+	ld e,(hl)
+	inc hl
+	ld d,(hl)
+	pop hl
+	push de
+	ld a,l
+	rlca
+	rlca
+	and 3
+	ld e,a
+	ld a,h
+	add a,a
+	add a,a
+	or e
+	add a,a
+	ld e,a
+	ld d,0
+	ld hl,rd_chunks+$8000
+	add hl,de
+	ld e,(hl)
+	inc hl
+	ld d,(hl)
+	pop hl
+	add hl,de
+	ld de,rd_plane+$8000
+	add hl,de
+	ret
+
+rd_hot_value: db 0
+	defs $C800-$,0
+	org $4800
 	defs $5000-$,0
 road_cpu_end:

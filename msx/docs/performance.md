@@ -442,3 +442,48 @@ run reached 2.981 page flips/s, with game-pass median/p95/worst latency of
 Other courses also retain multi-second worst game-pass latency. The audio and
 control checks pass while renderer stalls remain. Use the separate paired
 performance gate before accepting further optimization.
+
+### Direct road experiment with Up held (2026-11-17)
+
+Evidence: `benchmarks/2026-11-17/direct-road-up/`, including original metadata,
+CSV records, emulator logs, screenshots and a SHA-256 manifest. All runs select
+course 0 through the menu, hold Up at course confirmation and release steering.
+The harness sends one launch fire pulse; it no longer keeps sending jump inputs
+until the first measured pass. These runs must not be paired with older input
+protocols.
+
+The experimental producer now writes a line-major byte plane from native edge
+stores and encodes RLE once per publication. Its mapped store helper uses shadow
+BC/DE/HL, saved and restored around the whole native drawer. The consumer merges
+identical adjacent scanlines into taller V9990 LMMV rectangles. The general
+renderer still handles incompatible bitmap modes and overlapping character
+overlays after a canonical checkpoint. `road_busy` prevents IRQ rendering from
+consuming partially published spans without stopping the IRQ/audio chain.
+
+The batched differential replay completed 20 measured passes: 20 whole native
+drawer transactions and 198 rendered character rows matched the translated
+bitmap, collision/state regions and finished V9990 pixels. Cleanup reads and
+writes are also checked against the expected logical bitmap. This replay masks
+IRQs during paired drawer execution and is not timing evidence or complete
+long-window coverage.
+
+| Run | Result | Timing conclusion |
+| --- | --- | --- |
+| Default | 240 passes in 60.028 s; 4.015 flips/s | Valid paired baseline |
+| Unbatched direct | Timeout after 46 passes | Rejected |
+| Vertically batched direct | Timeout after 56 passes | Rejected; nested-renderer warnings invalidate FPS/latency instrumentation |
+
+The default baseline's 121–240 throughput is 3.267 passes/s. Its full-window
+game-pass median/p95/worst latency is 169/919/1,316 ms. Neither direct run reaches
+passes 121–160, so no late-window improvement is established. Timeout tail flips
+and useful world-counter increments cannot substitute for completed game passes.
+The paired gate rejects the batched candidate; it also reports the intentional
+`ROAD_DIRECT` configuration mismatch. The gate now checks input protocol and
+control metadata and rejects nested-renderer warnings.
+
+`ROAD_DIRECT=0` remains the default. The restored default ROM SHA-256 is
+`d901216ba89698e4186a4062916493c115c3c1e6a5b3d616fb0bbdf48f2ec318`.
+Next work must resolve the renderer/return-probe warnings and avoid unconditional
+full-road command submission, then repeat the complete paired gate. No speedup,
+playability, audible-output or real-hardware timing claim follows from this
+experiment.

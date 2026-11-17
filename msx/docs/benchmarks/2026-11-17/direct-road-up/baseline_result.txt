@@ -1,0 +1,2 @@
+status=complete passes=240
+seconds=60.028107482934274 loops_per_second=3.9981270452051305 flips=241 fps=4.0147859078934856

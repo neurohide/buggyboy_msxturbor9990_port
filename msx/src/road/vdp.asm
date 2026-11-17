@@ -5,6 +5,9 @@
 ; 12x8 CPU pixel buffer is used. Caller maps SEG_VIC back into page 2.
 	org $9000
 road_vdp_start:
+	; CPU $4800-$56FF is the producer's line-major byte plane. Its final
+	; portion overlaps this image's initial padding in the same mapper bank.
+	defs $9800-$,0
 rdv_row:
 	ld a,(row_mode)
 	cp 3
@@ -91,7 +94,10 @@ rdv_reject:
 	ld a,1
 	or a
 	ret
+; Merge identical adjacent RLE scanlines into one taller V9990 fill.
+; Palette and horizontal offset are constant throughout this character row.
 rdv_scanline:
+	call rdv_count_height
 	ld hl,(rdv_y)
 	ld (cmdblk+6),hl
 	ld a,(row_xoff)
@@ -163,16 +169,23 @@ rdv_next_byte:
 	ld hl,(rdv_ptr)
 	jr c,rdv_run
 	call rdv_flush
+	ld a,(rdv_height)
+	ld e,a
+	ld d,0
 	ld hl,(rdv_y)
-	inc hl
+	add hl,de
 	ld (rdv_y),hl
 	ld hl,(rdv_record)
-	ld de,80
-	add hl,de
+	ld bc,80
+rdv_advance:
+	add hl,bc
+	dec e
+	jr nz,rdv_advance
 	ld (rdv_record),hl
+	ld a,(rdv_height)
 	ld hl,rdv_line
-	inc (hl)
-	ld a,(hl)
+	add a,(hl)
+	ld (hl),a
 	cp 8
 	jp c,rdv_scanline
 	ld a,SEG_SHADOW
@@ -187,6 +200,59 @@ rdv_border:
 	ld (csf_need),a
 	call csel_fix
 	xor a
+	ret
+
+rdv_count_height:
+	ld a,8
+	ld hl,rdv_line
+	sub (hl)
+	ld b,a
+	ld c,1
+	ld hl,(rdv_record)
+	ld de,80
+	add hl,de
+	ex de,hl
+	ld hl,(rdv_record)
+rdv_height_next:
+	ld a,c
+	cp b
+	jr z,rdv_height_done
+	push bc
+	push hl
+	push de
+rdv_height_pair:
+	ld a,(de)
+	cp (hl)
+	jr nz,rdv_height_diff
+	ld b,a
+	inc hl
+	inc de
+	ld a,(de)
+	cp (hl)
+	jr nz,rdv_height_diff
+	inc hl
+	inc de
+	ld a,b
+	cp 40
+	jr c,rdv_height_pair
+	pop hl
+	ld de,80
+	add hl,de
+	ex de,hl
+	pop hl
+	pop bc
+	inc c
+	jr rdv_height_next
+rdv_height_diff:
+	pop de
+	pop hl
+	pop bc
+rdv_height_done:
+	ld a,c
+	ld (rdv_height),a
+	ld l,c
+	ld h,0
+	ld (cmdblk+10),hl
 	ret
 
 rdv_value:                      ; A = 2-bit value, B = pixel width
@@ -245,6 +311,7 @@ rdv_record: dw 0
 rdv_ptr: dw 0
 rdv_screen: db 0
 rdv_line: db 0
+rdv_height: db 0
 rdv_column: db 0
 rdv_end: db 0
 rdv_pattern: db 0

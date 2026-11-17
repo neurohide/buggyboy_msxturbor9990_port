@@ -1,0 +1,123 @@
+{
+  "metadata": {
+    "rom_sha256": "599ae2be70e22c7bed0decd8014a13ce228e270b823a1333b7b6f328ab7702b5",
+    "config": "MSX2PLUS: equ 1\nROAD_DIRECT: equ 1\nIRQ_SNAPSHOT: equ 1\nIRQ_NATIVE_MODE: equ 1",
+    "passes": 240,
+    "course": 0,
+    "acceleration": true,
+    "input_protocol": "up-at-course-confirmation-single-launch-fire-v1",
+    "steering": false,
+    "live_controls": false,
+    "differential": false,
+    "scenario": "straight",
+    "metrics": true,
+    "profile": false,
+    "validation": false
+  },
+  "long": {
+    "passes": 56,
+    "seconds": 138.88067561659375,
+    "passes_per_second": 0.4032238448680833,
+    "pass_latency_s": {
+      "median": 2.6655003638730577,
+      "p95": 4.788395731859794,
+      "worst": 5.1192050945022345
+    },
+    "renders": 58.0,
+    "render_s": 85.59917196179961,
+    "render_cpu_s": 35.260588706106944,
+    "irq_s": 82.10071699056721,
+    "irq_context_s": 82.57539044766868,
+    "irqs": 42932.0,
+    "cells": 8076.0,
+    "commands": 23345.0,
+    "lmmc": 1224.0,
+    "lmmv": 19266.0,
+    "lmmm": 1660.0,
+    "cmmc": 1195.0,
+    "other": 0.0,
+    "copy_pixels": 3914436.0,
+    "captures": 14047.0,
+    "capture_bytes": 632115.0,
+    "local_records": 235.0,
+    "local_bytes": 15040.0,
+    "recovery_calls": 0.0,
+    "collision_contacts": 4.0
+  },
+  "windows": {
+    "1-120": {
+      "passes": 56,
+      "seconds": 138.88067561659375,
+      "passes_per_second": 0.4032238448680833,
+      "pass_latency_s": {
+        "median": 2.6655003638730577,
+        "p95": 4.788395731859794,
+        "worst": 5.1192050945022345
+      },
+      "renders": 58.0,
+      "render_s": 85.59917196179961,
+      "render_cpu_s": 35.260588706106944,
+      "irq_s": 82.10071699056721,
+      "irq_context_s": 82.57539044766868,
+      "irqs": 42932.0,
+      "cells": 8076.0,
+      "commands": 23345.0,
+      "lmmc": 1224.0,
+      "lmmv": 19266.0,
+      "lmmm": 1660.0,
+      "cmmc": 1195.0,
+      "other": 0.0,
+      "copy_pixels": 3914436.0,
+      "captures": 14047.0,
+      "capture_bytes": 632115.0,
+      "local_records": 235.0,
+      "local_bytes": 15040.0,
+      "recovery_calls": 0.0,
+      "collision_contacts": 4.0
+    }
+  },
+  "flip_latency_s": {
+    "median": 0.059809836166323294,
+    "p95": 0.11961995169778561,
+    "worst": 8.732242785046708
+  },
+  "render_latency_s": {
+    "median": 1.2105570680072546,
+    "p95": 2.7780150829225505,
+    "worst": 2.9252662000338034
+  },
+  "progress": {
+    "first": 0,
+    "last": 1742,
+    "steps": 1742,
+    "steps_per_second": 12.543141745717877,
+    "valid": true,
+    "moving_passes": 40
+  },
+  "scenarios": {
+    "steering_response": true,
+    "collision_pass": 12,
+    "collision_recovered": true,
+    "steering_response_passes": {
+      "left": null,
+      "right": null
+    }
+  },
+  "profiler_valid": false,
+  "measurement_valid": false,
+  "gate": {
+    "accepted": false,
+    "reasons": [
+      "candidate: incomplete window, progress, or scenario evidence",
+      "Unmatched metadata: config",
+      "Long-window throughput regressed",
+      "pass_latency_s/median regressed",
+      "pass_latency_s/p95 regressed",
+      "pass_latency_s/worst regressed",
+      "flip_latency_s/worst regressed",
+      "render_latency_s/median regressed",
+      "render_latency_s/p95 regressed",
+      "render_latency_s/worst regressed"
+    ]
+  }
+}

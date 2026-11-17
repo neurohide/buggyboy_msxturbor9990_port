@@ -1,0 +1,12 @@
+pass,time,event,value
+1,32.49183737039205,scenario,straight
+12,72.83440632817857,collision_contact,T_19D0:6:24
+12,72.83761343969694,impact_animation,24
+16,78.7197766755272,recovered,8
+18,84.31597675123514,collision_contact,T_19D0:6:19
+18,84.31895813574071,impact_animation,19
+40,108.55127732714632,collision_contact,T_19D0:2:24
+40,108.55651123257284,impact_animation,24
+44,122.10955554407055,collision_contact,T_19D0:4:20
+44,122.1145603701029,impact_animation,20
+53,156.1271770574193,impact_animation,24

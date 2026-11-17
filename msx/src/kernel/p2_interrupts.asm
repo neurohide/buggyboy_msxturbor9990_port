@@ -339,6 +339,11 @@ ivb_skip:
 	inc (hl)
 	ret
 ivb_go:
+	if ROAD_DIRECT
+	ld a,(road_busy)
+	or a
+	ret nz                      ; keep IRQ/audio cadence while a road update publishes
+	endif
 	xor a
 	ld (skip_n),a
 	ld (mt_sync),a

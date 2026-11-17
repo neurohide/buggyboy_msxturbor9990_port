@@ -6,6 +6,11 @@
 ; L3503 is only ever set to $AA.  Exit as the 6502: X = $48, block 3 mapped.
 	call k_vic_on
 	if ROAD_DIRECT
+	exx
+	push bc
+	push de
+	push hl
+	exx
 	call k_farcall
 	db SEG_ROAD
 	dw rd_begin
@@ -726,6 +731,11 @@ NR_exit:
 	db SEG_ROAD
 	dw rd_finish
 	pop hl
+	exx
+	pop hl
+	pop de
+	pop bc
+	exx
 	endif
 	call k_c2
 	if MSX2PLUS
@@ -861,15 +871,23 @@ NR_e34p:                        ; range line, L02D2 set: edges 3/4 parked
 	jp NR_next
 NR_st:                          ; changed byte: store, mark dirty (A BC DE HL kept)
 	if ROAD_DIRECT
+	; Shadow BC/DE/HL are saved once for the whole drawer. IRQs preserve
+	; both sets. Publish the mapper variable before switching page 3.
+	push af
 	push hl
-	push ix
-	push hl
-	pop ix
-	call k_farcall
-	db SEG_ROAD
-	dw rd_put
-	pop ix
+	ld a,SEG_ROAD
+	ld (cur_p3),a
+	out (PORT_P3),a
+	exx
 	pop hl
+	pop af
+	push af
+	call rd_hot_put
+	exx
+	ld a,SEG_VIC
+	ld (cur_p3),a
+	out (PORT_P3),a
+	pop af
 	ret
 	else
 	ld (hl),a                   ; road stores never reach $FFFF (bitmap rows)

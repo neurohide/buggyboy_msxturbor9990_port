@@ -13,6 +13,9 @@ namespace eval road_check {
  variable regions {{0x4e 3} {0x55 1} {0xfb 2} {0x4d8 576} {0x3002 1} {0x3503 1}}
 }
 proc road_check::fail {message} {puts stderr "Road spans FAILED: $message"; exit 1; error $message}
+proc road_check::entry_matches {name} {
+ return [expr {[debug read_block memory [dict get $::road_labels ${name}_entry] 8] eq [binary format H* [dict get $::road_labels ${name}_signature]]}]
+}
 proc road_check::registers {} {
  set result {}
  foreach name {af bc de hl ix iy sp pc iff} {lappend result $name [reg $name]}
@@ -29,7 +32,14 @@ proc road_check::restore {memory registers} {
 proc road_check::enter {{kind edge}} {
  variable phase; variable ram; variable pre; variable regs; variable sp; variable returns; variable iff
  variable operation; variable prelogical
- if {$phase || !$::begun} return
+ if {$phase || !$::course_ready} return
+ # cur_p1 also remains stale during sound_frame calls outside the C64 IRQ
+ # chain. Verify the mapped entry instruction, independent of mapper reads.
+ if {$kind eq "cleanup"} {
+  if {![entry_matches cleanup]} return
+ } else {
+  if {![entry_matches road]} return
+ }
  set active [debug read memory 0x2fe1]
  if {$kind eq "cleanup" && !$active} return
  if {$kind eq "edge" && $active} {fail {previous span transaction was not checkpointed}}
@@ -82,7 +92,7 @@ proc road_check::leave {} {
   }
   set result [logical $post]
   if {$operation eq "cleanup" && $expected ne $result} {
-   fail "cleanup span publication differs from observed reads/writes changed=[debug read memory [dict get $::road_labels rd_changed]] cached=[debug read memory [dict get $::road_labels rd_cached]]"
+   fail {cleanup span publication differs from observed reads/writes}
   }
   set expected $result
   restore $pre $regs
@@ -110,7 +120,9 @@ proc road_check::leave {} {
   lassign $region start length
   set end [expr {$start+$length-1}]
   if {[string range $post $start $end] ne [string range $reference $start $end]} {
-   fail [format {collision/state region $%04X differs at pair %d} $start $count]
+   binary scan [string range $post $start $end] H* native
+   binary scan [string range $reference $start $end] H* translated
+   fail [format {collision/state region $%04X differs at pair %d operation %s native=%s reference=%s} $start $count $operation $native $translated]
   }
  }
  restore $post $post_regs
@@ -122,7 +134,8 @@ proc road_check::leave {} {
 proc road_check::summary {args} {
  variable count; variable phase; variable pixel_rows; variable pending
  if {!$count || $phase || !$pixel_rows || [llength $pending]} {fail "incomplete coverage transactions=$count phase=$phase pixel_rows=$pixel_rows pending=[llength $pending] reads=$::road_check::reads writes=$::road_check::writes general=$::road_check::general flags=$::road_check::assumptions"}
- puts stderr "Road spans verification passed: $count transactions, $pixel_rows V9990 rows, bitmap and collision inputs match"
+ set status [lindex [lindex $args 0] 1]
+ puts stderr "Road spans checks: status=$status, $count transactions, $pixel_rows V9990 rows, bitmap and collision inputs match"
 }
 proc road_check::general_enter {} {
  if {$::road_check::phase || !$::begun} return
@@ -136,16 +149,32 @@ proc road_check::word {label} {
  set a [dict get $::road_labels $label]
  return [expr {[debug read memory $a] | [debug read memory [expr {$a+1}]]<<8}]
 }
+proc road_check::palette_inputs {} {
+ variable source_screen; variable source_cram
+ if {([reg bc] >> 8) == 40} {set source_screen {}; set source_cram {}}
+ lappend source_screen [debug read memory [reg hl]]
+ lappend source_cram [debug read memory [reg de]]
+}
 proc road_check::pixels_begin {} {
  variable pending; variable ram; variable expected
+ variable source_screen; variable source_cram
  if {![info exists expected]} return
+ if {[debug read memory [dict get $::road_labels road_busy]]} {fail {renderer consumed unpublished road spans}}
  if {[llength $pending]} {fail {previous V9990 row was not checked}}
  set row [debug read memory [dict get $::road_labels cur_row]]
+ set live [logical [debug read_block $ram 0x10000 0x20000]]
+ for {set line 0} {$line < 8} {incr line} {
+  for {set col 0} {$col < 40} {incr col} {
+   set offset [expr {0x2000+$row*320+$col*8+$line}]
+   if {[string index $live $offset] ne [string index $expected $offset]} {fail "unverified span update row=$row column=$col line=$line transactions=$::road_check::count"}
+  }
+ }
  set x [expr {[dict get $::road_labels SCREEN_X]+[debug read memory [dict get $::road_labels row_xoff]]}]
  set y [expr {[dict get $::road_labels CLEAN_Y]+[dict get $::road_labels SCREEN_Y]+8*$row}]
  binary scan $expected cu* bitmap
- binary scan [debug read_block $ram [expr {0x14000+([word row_scr]&0x3fff)}] 40] cu* screen
- binary scan [debug read_block memory [word row_cram] 40] cu* cram
+ set screen $source_screen
+ set cram $source_cram
+ if {[llength $screen] != 40 || [llength $cram] != 40} {fail {incomplete palette input capture}}
  set palettes {}
  for {set col 0} {$col < 40} {incr col} {
   set palette {0}
@@ -156,6 +185,11 @@ proc road_check::pixels_begin {} {
    lappend palette $slot
   }
   lappend palettes $palette
+ }
+ binary scan [debug read_block memory [dict get $::road_labels rdv_colors] 160] cu* native_colors
+ for {set col 0} {$col < 40} {incr col} {
+  set actual [lrange $native_colors [expr {$col*4}] [expr {$col*4+3}]]
+  if {$actual ne [lindex $palettes $col]} {fail "palette row=$row column=$col actual=$actual expected=[lindex $palettes $col] screen=[lindex $screen $col] cram=[lindex $cram $col] fslot=[binary encode hex [debug read_block memory [dict get $::road_labels fslot] 16]]"}
  }
  set rows {}
  for {set line 0} {$line < 8} {incr line} {
@@ -178,12 +212,17 @@ proc road_check::pixels_finish {} {
  lassign $pending x y rows
  set line 0
  foreach pixels $rows {
-  binary scan [debug read_block {Sunrise GFX9000 VRAM} [expr {($y+$line)*256}] 256] cu* raw
+  # B3 interleaves logical bytes across the two 256K VRAM banks.
+  set base [expr {($y+$line)*128}]
+  binary scan [debug read_block {Sunrise GFX9000 VRAM} $base 128] cu* even
+  binary scan [debug read_block {Sunrise GFX9000 VRAM} [expr {$base+0x40000}] 128] cu* odd
+  set raw {}
+  foreach a $even b $odd {lappend raw $a $b}
   set p $x
   foreach want $pixels {
    set byte [lindex $raw [expr {$p/2}]]
    set got [expr {($byte >> (($p&1)?0:4))&15}]
-   if {$got != $want} {fail "V9990 pixel x=$p y=[expr {$y+$line}] actual=$got expected=$want pass=$::n"}
+   if {$got != $want} {fail "V9990 pixel x=$p y=[expr {$y+$line}] actual=$got expected=$want pass=$::n transactions=$::road_check::count verified_rows=$pixel_rows"}
    incr p
   }
   incr line
@@ -225,16 +264,23 @@ proc road_check::cleanup_write {} {
  set address [expr {[reg ix]&0x3fff}]
  set expected [string replace $expected $address $address [binary format c [expr {[reg af]>>8}]]]
 }
+proc road_check::publication {} {
+ variable expected; variable ram
+ if {![info exists expected]} return
+ if {[logical [debug read_block $ram 0x10000 0x20000]] ne $expected} {fail {published spans differ from verified drawer and cleanup accesses}}
+}
 set road_check::reads 0
 set road_check::writes 0
-# Audio temporarily maps the renderer without changing cur_p1. Check the
-# actual mapper port too, or an audio PC alias can impersonate a game entry.
-debug set_bp [dict get $::road_labels road_entry] {[debug read memory 0x2f60] == [dict get $::road_labels road_segment] && ([debug read ioports 253]&15) == [dict get $::road_labels road_segment]} road_check::enter
-debug set_bp [dict get $::road_labels T_289C] {[debug read memory 0x2f60] == [dict get $::road_labels general_segment] && ([debug read ioports 253]&15) == [dict get $::road_labels general_segment]} road_check::general_enter
-debug set_bp [dict get $::road_labels cleanup_entry] {[debug read memory 0x2f60] == [dict get $::road_labels cleanup_segment] && ([debug read ioports 253]&15) == [dict get $::road_labels cleanup_segment]} {road_check::enter cleanup}
-debug set_bp [dict get $::road_labels rd_read_done] {$road_check::phase == 1 && $road_check::operation eq "cleanup" && [debug read memory 0x2f60] == 14} road_check::cleanup_read
-debug set_bp [dict get $::road_labels rd_write_put] {$road_check::phase == 1 && $road_check::operation eq "cleanup" && [debug read memory 0x2f60] == 14} road_check::cleanup_write
+# Audio temporarily maps the renderer without changing cur_p1. Main-game
+# probes must check mapped instructions, where an audio PC can alias game code.
+debug set_bp [dict get $::road_labels road_entry] {[road_check::entry_matches road]} road_check::enter
+debug set_bp [dict get $::road_labels T_289C] {[debug read memory 0x2f60] == [dict get $::road_labels general_segment] && ![debug read memory 0x2fc4]} road_check::general_enter
+debug set_bp [dict get $::road_labels cleanup_entry] {[road_check::entry_matches cleanup]} {road_check::enter cleanup}
+debug set_bp [dict get $::road_labels rd_read_done] {$road_check::phase != 2 && [info exists ::road_check::expected] && [debug read memory 0x2f60] == 14} road_check::cleanup_read
+debug set_bp [dict get $::road_labels rd_write_put] {$road_check::phase != 2 && [info exists ::road_check::expected] && [debug read memory 0x2f60] == 14} road_check::cleanup_write
+debug set_bp [dict get $::road_labels rd_pop] {!$road_check::phase && [debug read memory 0x2f60] == 14 && [debug read memory 0x2fe1] && ![debug read memory 0x2fe3]} road_check::publication
+debug set_bp [dict get $::road_labels rdv_palette] {[debug read memory 0x2f61] == 14 && [debug read memory [dict get $::road_labels rdv_palette]] == 0x7e} road_check::palette_inputs
 debug set_bp [dict get $::road_labels rdv_border] {[debug read memory 0x2f61] == 14} road_check::pixels_begin
 debug set_bp [dict get $::road_labels v_wait_done] {$road_check::pending ne {} && [debug read memory 0x2f60] == 12} road_check::pixels_finish
-debug set_bp [dict get $::road_labels rd_checkpoint] {([debug read ioports 253]&15) == 14} road_check::disarm_access_guard
+debug set_bp [dict get $::road_labels rd_checkpoint] {[debug read memory 0x2f60] == 14 && [debug read memory [dict get $::road_labels rd_checkpoint]] == 0xf5} road_check::disarm_access_guard
 trace add execution finish enter road_check::summary

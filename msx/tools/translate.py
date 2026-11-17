@@ -761,11 +761,29 @@ class Gen:
                     self.native_irq(a, cur_seg)
                     return
                 source = open(os.path.join(NATIVE_DIR, NATIVE[a][1])).read()
+                if NATIVE[a][1] == 'n289c.asm':
+                    # Resolve this feature before segment-size estimation too.
+                    # Counting inactive branches can reshuffle the default ROM.
+                    selected, active, parent = [], True, None
+                    for line in source.splitlines():
+                        directive = line.strip()
+                        if directive == 'if ROAD_DIRECT':
+                            parent, active = active, ROAD_DIRECT
+                        elif parent is not None and directive == 'else':
+                            active = not ROAD_DIRECT
+                        elif parent is not None and directive == 'endif':
+                            active, parent = parent, None
+                        elif active:
+                            selected.append(line)
+                    source = '\n'.join(selected)
                 if ROAD_DIRECT and NATIVE[a][1] == 'n289c.asm':
                     # Span writes have no VIC bitmap read/compare. Native edge
                     # order and footprint-table updates remain unchanged.
                     source = source.replace('\tcp (hl)\n\tcall nz,NR_st', '\tcall NR_st')
                     source = source.replace('\tcp (hl)\n\tret z\n\tjp NR_st', '\tjp NR_st')
+                    # Other game routines reuse the final zero-page scratch.
+                    # Execute the last scanline even when all edges are stable.
+                    source = source.replace('\tjr nz,NR_fast_return', '\tjr nz,NR_draw')
                 for l in source.splitlines():
                     l = l.rstrip()
                     if l and not l.lstrip().startswith(';'):

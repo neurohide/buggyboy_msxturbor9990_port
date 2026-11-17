@@ -1,0 +1,107 @@
+{
+  "metadata": {
+    "rom_sha256": "f19d2ba693856eae0970adf1a11ee77bced73954c39178680a58c7ea49204dc5",
+    "config": "MSX2PLUS: equ 1\nROAD_DIRECT: equ 1\nIRQ_SNAPSHOT: equ 1\nIRQ_NATIVE_MODE: equ 1",
+    "passes": 240,
+    "course": 0,
+    "acceleration": true,
+    "input_protocol": "up-at-course-confirmation-single-launch-fire-v1",
+    "steering": false,
+    "live_controls": false,
+    "differential": false,
+    "scenario": "straight",
+    "metrics": true,
+    "profile": true,
+    "validation": false
+  },
+  "long": {
+    "passes": 46,
+    "seconds": 138.3175557228642,
+    "passes_per_second": 0.33256805153618035,
+    "pass_latency_s": {
+      "median": 3.1996457650343864,
+      "p95": 4.8686682245927955,
+      "worst": 6.416431138594433
+    },
+    "renders": 48.0,
+    "render_s": 85.51519704319963,
+    "render_cpu_s": 35.22429694276793,
+    "irq_s": 81.70471442599619,
+    "irq_context_s": 82.84462885646161,
+    "irqs": 42732.0,
+    "cells": 7583.0,
+    "commands": 23885.0,
+    "lmmc": 1160.0,
+    "lmmv": 20078.0,
+    "lmmm": 1519.0,
+    "cmmc": 1128.0,
+    "other": 0.0,
+    "copy_pixels": 3706440.0,
+    "captures": 13991.0,
+    "capture_bytes": 629595.0,
+    "local_records": 195.0,
+    "local_bytes": 12480.0,
+    "recovery_calls": 0.0,
+    "collision_contacts": 4.0
+  },
+  "windows": {
+    "1-120": {
+      "passes": 46,
+      "seconds": 138.3175557228642,
+      "passes_per_second": 0.33256805153618035,
+      "pass_latency_s": {
+        "median": 3.1996457650343864,
+        "p95": 4.8686682245927955,
+        "worst": 6.416431138594433
+      },
+      "renders": 48.0,
+      "render_s": 85.51519704319963,
+      "render_cpu_s": 35.22429694276793,
+      "irq_s": 81.70471442599619,
+      "irq_context_s": 82.84462885646161,
+      "irqs": 42732.0,
+      "cells": 7583.0,
+      "commands": 23885.0,
+      "lmmc": 1160.0,
+      "lmmv": 20078.0,
+      "lmmm": 1519.0,
+      "cmmc": 1128.0,
+      "other": 0.0,
+      "copy_pixels": 3706440.0,
+      "captures": 13991.0,
+      "capture_bytes": 629595.0,
+      "local_records": 195.0,
+      "local_bytes": 12480.0,
+      "recovery_calls": 0.0,
+      "collision_contacts": 4.0
+    }
+  },
+  "flip_latency_s": {
+    "median": 3.668339411852628,
+    "p95": 4.74491450729073,
+    "worst": 4.904521384701127
+  },
+  "render_latency_s": {
+    "median": 2.416970313266063,
+    "p95": 2.8184995579047154,
+    "worst": 2.982464531106615
+  },
+  "progress": {
+    "first": 0,
+    "last": 1738,
+    "steps": 1738,
+    "steps_per_second": 12.565288555866989,
+    "valid": true,
+    "moving_passes": 40
+  },
+  "scenarios": {
+    "steering_response": true,
+    "collision_pass": 11,
+    "collision_recovered": true,
+    "steering_response_passes": {
+      "left": null,
+      "right": null
+    }
+  },
+  "measurement_valid": false
+}
